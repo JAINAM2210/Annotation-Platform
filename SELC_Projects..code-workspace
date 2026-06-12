@@ -1,0 +1,11 @@
+{
+	"folders": [
+		{
+			"name": "SELC_Projects",
+			"path": "../../.."
+		}
+	],
+	"settings": {
+		"liveServer.settings.port": 5502
+	}
+}

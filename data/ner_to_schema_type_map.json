@@ -1,0 +1,18 @@
+{
+  "DiagnosticDevice": "Diagnostic Device",
+  "DischargeRegime": "DischargeRegime",
+  "ElectrodeConfiguration": "Configuration",
+  "ElectrodeMaterial": "ElectrodeMaterial",
+  "Experiment": "Scientific Experiment",
+  "Modelling": "Scientific Study",
+  "PhysicalEffect": "Physical Effect",
+  "PhysicalQuantity": "Quantity",
+  "PlasmaApplication": "Application Field",
+  "PlasmaMedium": "Medium",
+  "PlasmaProperties": "Property",
+  "PlasmaSource": "Plasma Source",
+  "PlasmaTarget": "Target",
+  "PowerSupply": "PowerSupply",
+  "Species": "Species",
+  "Unit": "Unit"
+}

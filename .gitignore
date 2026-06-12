@@ -1,0 +1,26 @@
+# Env / secrets
+.env
+*.env
+!.env.example
+backend/firebase-service-account.json
+
+# Local databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+backend/.venv/
+.venv/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Logs
+*.log
+npm-debug.log*

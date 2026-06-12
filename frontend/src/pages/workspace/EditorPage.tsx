@@ -1,0 +1,528 @@
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent } from 'react';
+import { AlertTriangle, Database, FileText, RefreshCw, RotateCcw, Save, ScrollText, Send } from 'lucide-react';
+import {
+  addDirectSchemaPredicate,
+  savePaperRelations,
+  submitAssignment,
+} from '../../api/client';
+import { useAuth } from '../../auth/AuthContext';
+import ParagraphEditor from '../../components/ParagraphEditor';
+import { errorMessage, type Message } from '../../lib/status';
+import { Button, EmptyState, MessageBanner, ProgressBar, SelectControl, StatusPill } from '../../ui/Primitives';
+import type {
+  MentionRecord,
+  PaperAssignmentState,
+  PaperDetailResponse,
+  ParagraphRecord,
+  RelationRecord,
+  SentenceRecord,
+} from '../../types';
+import { useWorkspaceData, type EditorDraftState } from './WorkspaceDataContext';
+
+function relationsEqual(left: RelationRecord[], right: RelationRecord[]) {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function editableRelations(items: RelationRecord[]) {
+  return items;
+}
+
+const SIDEBAR_WIDTH_STORAGE_KEY = 'annotationPlatform.editorSidebarWidth';
+const DEFAULT_SIDEBAR_WIDTH = 304;
+const MIN_SIDEBAR_WIDTH = 248;
+const MAX_SIDEBAR_WIDTH = 520;
+const SIDEBAR_KEYBOARD_STEP = 24;
+
+function clampSidebarWidth(value: number) {
+  return Math.min(MAX_SIDEBAR_WIDTH, Math.max(MIN_SIDEBAR_WIDTH, Math.round(value)));
+}
+
+function initialSidebarWidth() {
+  if (typeof window === 'undefined') return DEFAULT_SIDEBAR_WIDTH;
+  const stored = Number(window.localStorage.getItem(SIDEBAR_WIDTH_STORAGE_KEY));
+  return Number.isFinite(stored) && stored > 0 ? clampSidebarWidth(stored) : DEFAULT_SIDEBAR_WIDTH;
+}
+
+function emptyEditorCopy(role?: string) {
+  if (role === 'admin') {
+    return {
+      title: 'No papers are available yet',
+      description: 'Check the database paper import/population before starting annotation work.',
+    };
+  }
+  if (role === 'reviewer') {
+    return {
+      title: 'No papers under your review yet',
+      description: 'Create an assignment from the Assignments tab to begin reviewer-led annotation work.',
+    };
+  }
+  return {
+    title: 'No papers assigned yet',
+    description: 'Your reviewer or admin will assign a paper when it is ready.',
+  };
+}
+
+function draftFromDetail(detail: PaperDetailResponse | null | undefined): EditorDraftState {
+  return {
+    relations: detail?.relations ?? [],
+    baselineRelations: detail?.relations ?? [],
+    history: [],
+    dirty: false,
+    currentSentenceIndex: detail?.sentences[0]?.sentence_index ?? (detail?.paragraphs.length ? 1 : 0),
+  };
+}
+
+export function EditorPage() {
+  const { currentUser, getAccessToken } = useAuth();
+  const {
+    papers: papersResource,
+    paperDetails,
+    selectedPaperId: paperId,
+    setSelectedPaperId,
+    editorDrafts,
+    setEditorDraft,
+    ensurePapers,
+    ensurePaperDetail,
+    refreshEditorAfterWorkflowChange,
+  } = useWorkspaceData();
+  const [loading, setLoading] = useState('');
+  const [message, setMessage] = useState<Message>({ type: 'info', text: 'Workspace ready' });
+  const [status, setStatus] = useState('');
+  const [sidebarWidth, setSidebarWidth] = useState(initialSidebarWidth);
+  const [isResizingSidebar, setIsResizingSidebar] = useState(false);
+
+  const papers = papersResource.data;
+  const selectedPaper = papers.find((paper) => paper.paper_id === paperId);
+  const detailResource = paperId ? paperDetails[paperId] : undefined;
+  const detail = detailResource?.data ?? null;
+  const paperMeta = detail?.paper ?? null;
+  const assignmentState: PaperAssignmentState | null = detail?.assignment ?? detail?.paper.assignment ?? null;
+  const sentences = detail?.sentences ?? [];
+  const paragraphs = detail?.paragraphs ?? [];
+  const mentions = detail?.mentions ?? [];
+  const sourceLabel = detail?.source ?? 'source';
+  const warnings = detail?.warnings ?? [];
+  const draftState = editorDrafts[paperId] ?? draftFromDetail(detail);
+  const relations = draftState.relations;
+  const baselineRelations = draftState.baselineRelations;
+  const history = draftState.history;
+  const dirty = draftState.dirty;
+  const currentSentenceIndex = draftState.currentSentenceIndex;
+  const hasLoadedPaperList = papersResource.lastLoadedAt > 0;
+  const noPapers = hasLoadedPaperList && papers.length === 0;
+  const initialEditorLoading = papersResource.initialLoading || Boolean(paperId && detailResource?.initialLoading && !paperMeta);
+  const editorError = papersResource.error || detailResource?.error || '';
+
+  async function run(label: string, action: () => Promise<void>) {
+    setLoading(label);
+    try {
+      await action();
+    } catch (error) {
+      setMessage({ type: 'error', text: errorMessage(error) });
+    } finally {
+      setLoading('');
+    }
+  }
+
+  useEffect(() => {
+    void run('load-papers', async () => {
+      await ensurePapers(false);
+    });
+  }, [ensurePapers]);
+
+  useEffect(() => {
+    if (!paperId) {
+      setStatus('');
+      return;
+    }
+    const hasCachedDetail = Boolean(paperDetails[paperId]?.data);
+    if (!hasCachedDetail) setStatus('Loading paper...');
+    void ensurePaperDetail(paperId, false)
+      .then(() => {
+        setStatus('');
+        setMessage({ type: 'success', text: 'Paper loaded' });
+      })
+      .catch((error) => {
+        setStatus('');
+        setMessage({ type: 'error', text: errorMessage(error) });
+      });
+  }, [ensurePaperDetail, paperDetails, paperId]);
+
+  useEffect(() => {
+    if (!paperId || !detail || editorDrafts[paperId]) return;
+    setEditorDraft(paperId, draftFromDetail(detail));
+  }, [detail, editorDrafts, paperId, setEditorDraft]);
+
+  useEffect(() => {
+    if (!paperId) return;
+    setEditorDraft(paperId, (current) => ({
+      ...(current ?? draftFromDetail(detail)),
+      currentSentenceIndex: paragraphs.length > 0 ? Math.max(1, current?.currentSentenceIndex ?? 1) : 0,
+    }));
+  }, [detail, paperId, paragraphs.length, setEditorDraft]);
+
+  useEffect(() => {
+    window.localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, String(sidebarWidth));
+  }, [sidebarWidth]);
+
+  useEffect(() => {
+    if (!paperId || paragraphs.length === 0) return undefined;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const visible = entries
+          .filter((entry) => entry.isIntersecting)
+          .sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top);
+        if (visible.length === 0) return;
+        const visibleIndex = Number(visible[0].target.getAttribute('data-progress-index') || '1');
+        setEditorDraft(paperId, (current) => ({
+          ...(current ?? draftFromDetail(detail)),
+          currentSentenceIndex: visibleIndex,
+        }));
+      },
+      { root: null, rootMargin: '-90px 0px -70% 0px', threshold: [0.05, 0.2, 0.5] }
+    );
+    const elements = Array.from(document.querySelectorAll<HTMLElement>('[data-progress-index]'));
+    elements.forEach((element) => observer.observe(element));
+    return () => observer.disconnect();
+  }, [detail, mentions, paperId, paragraphs, relations, sentences, setEditorDraft]);
+
+  const mentionsBySentence = useMemo(() => {
+    const grouped = new Map<string, MentionRecord[]>();
+    mentions.forEach((mention) => {
+      if (!grouped.has(mention.sentence_id)) grouped.set(mention.sentence_id, []);
+      grouped.get(mention.sentence_id)!.push(mention);
+    });
+    return grouped;
+  }, [mentions]);
+
+  const sentenceById = useMemo(() => new Map(sentences.map((sentence) => [sentence.sentence_id, sentence])), [sentences]);
+
+  const paragraphBySentenceId = useMemo(() => {
+    const grouped = new Map<string, string>();
+    paragraphs.forEach((paragraph) => paragraph.sentence_ids.forEach((sentenceId) => grouped.set(sentenceId, paragraph.paragraph_id)));
+    return grouped;
+  }, [paragraphs]);
+
+  const relationsByParagraph = useMemo(() => {
+    const grouped = new Map<string, RelationRecord[]>();
+    relations.forEach((relation) => {
+      if (relation.support_paragraph_id) {
+        if (!grouped.has(relation.support_paragraph_id)) grouped.set(relation.support_paragraph_id, []);
+        grouped.get(relation.support_paragraph_id)!.push(relation);
+        return;
+      }
+      const ids = relation.support_sentence_ids ? relation.support_sentence_ids.split(';').filter(Boolean) : relation.sentence_id ? [relation.sentence_id] : [];
+      Array.from(new Set(ids.map((sentenceId) => paragraphBySentenceId.get(sentenceId)).filter(Boolean))).forEach((paragraphId) => {
+        if (!grouped.has(paragraphId!)) grouped.set(paragraphId!, []);
+        grouped.get(paragraphId!)!.push(relation);
+      });
+    });
+    return grouped;
+  }, [paragraphBySentenceId, relations]);
+
+  const totalItems = paragraphs.length;
+  const progressPercent = totalItems > 0 ? Math.min(100, Math.round((currentSentenceIndex / totalItems) * 100)) : 0;
+  const activeAssignment = assignmentState ?? selectedPaper?.assignment ?? null;
+  const editableAssignmentStatuses = new Set(['assigned', 'in_progress', 'returned']);
+  const canEdit = Boolean(activeAssignment && editableAssignmentStatuses.has(activeAssignment.status) && currentUser?.role !== 'reviewer');
+  const readOnly = !canEdit;
+  const canSubmit = Boolean(canEdit && currentUser?.role === 'annotator' && activeAssignment?.latest_submission_status === 'draft' && !dirty);
+  const editorAccessMessage = !activeAssignment
+    ? 'Create an assignment before editing this paper.'
+    : activeAssignment.status === 'submitted'
+      ? 'This assignment has been submitted for review and is read-only.'
+      : activeAssignment.status === 'approved'
+        ? 'This assignment has been approved and is read-only.'
+        : activeAssignment.status === 'cancelled'
+          ? 'This assignment was cancelled and is read-only.'
+          : currentUser?.role === 'reviewer'
+            ? 'Reviewers inspect submitted work in the Review tab; direct editing is disabled.'
+            : '';
+  const paperOptions = useMemo(() => [...papers]
+    .sort((left, right) => (left.title || left.paper_id).localeCompare(right.title || right.paper_id, undefined, { sensitivity: 'base' }))
+    .map((paper) => ({
+      value: paper.paper_id,
+      label: paper.title || paper.paper_id,
+      description: paper.doi ? `DOI: ${paper.doi}` : 'DOI not available',
+      meta: paper.paper_id,
+      previewTitle: paper.title || paper.paper_id,
+      previewDescription: paper.has_edited_version ? `${paper.paper_id} · edited` : paper.paper_id,
+    })), [papers]);
+
+  const commitRelations = (updater: (current: RelationRecord[]) => RelationRecord[]) => {
+    if (readOnly || !paperId) return;
+    setEditorDraft(paperId, (current) => {
+      const base = current ?? draftState;
+      const next = updater(base.relations);
+      return {
+        ...base,
+        relations: next,
+        history: [...base.history, base.relations],
+        dirty: !relationsEqual(editableRelations(next), editableRelations(base.baselineRelations)),
+      };
+    });
+  };
+
+  async function handleSave() {
+    if (!paperId || readOnly) return;
+    await run('save-relations', async () => {
+      const token = await getAccessToken();
+      const currentRelations = editableRelations(relations);
+      const result = await savePaperRelations(token, paperId, currentRelations, 'paragraph');
+      setStatus(`Saved to ${result.saved_to}`);
+      setEditorDraft(paperId, (current) => ({
+        ...(current ?? draftState),
+        relations: currentRelations,
+        baselineRelations: currentRelations,
+        history: [],
+        dirty: false,
+      }));
+      await refreshEditorAfterWorkflowChange(paperId);
+      setMessage({ type: 'success', text: 'Draft saved' });
+    });
+  }
+
+  async function handleSubmitAssignment() {
+    if (!activeAssignment || !canSubmit) return;
+    await run('submit-assignment', async () => {
+      const token = await getAccessToken();
+      await submitAssignment(token, activeAssignment.assignment_id);
+      await refreshEditorAfterWorkflowChange(paperId);
+      setMessage({ type: 'success', text: 'Submitted for review' });
+    });
+  }
+
+  async function handleAddDirectPredicate(predicate: string) {
+    const token = await getAccessToken();
+    await addDirectSchemaPredicate(token, predicate);
+  }
+
+  function handleUndo() {
+    if (!paperId) return;
+    setEditorDraft(paperId, (current) => {
+      const base = current ?? draftState;
+      if (base.history.length === 0) return base;
+      const previous = base.history[base.history.length - 1];
+      return {
+        ...base,
+        relations: previous,
+        history: base.history.slice(0, -1),
+        dirty: !relationsEqual(editableRelations(previous), editableRelations(base.baselineRelations)),
+      };
+    });
+  }
+
+  const handleSidebarResizeStart = useCallback((event: ReactPointerEvent<HTMLButtonElement>) => {
+    event.preventDefault();
+    let nextWidth = sidebarWidth;
+    const startX = event.clientX;
+    const startWidth = sidebarWidth;
+
+    setIsResizingSidebar(true);
+
+    const handlePointerMove = (moveEvent: PointerEvent) => {
+      nextWidth = clampSidebarWidth(startWidth + moveEvent.clientX - startX);
+      setSidebarWidth(nextWidth);
+    };
+
+    const handlePointerEnd = () => {
+      setSidebarWidth(nextWidth);
+      setIsResizingSidebar(false);
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', handlePointerEnd);
+      window.removeEventListener('pointercancel', handlePointerEnd);
+    };
+
+    window.addEventListener('pointermove', handlePointerMove);
+    window.addEventListener('pointerup', handlePointerEnd);
+    window.addEventListener('pointercancel', handlePointerEnd);
+  }, [sidebarWidth]);
+
+  const handleSidebarResizeKeyDown = useCallback((event: ReactKeyboardEvent<HTMLButtonElement>) => {
+    if (event.key === 'ArrowLeft') {
+      event.preventDefault();
+      setSidebarWidth((current) => clampSidebarWidth(current - SIDEBAR_KEYBOARD_STEP));
+    }
+    if (event.key === 'ArrowRight') {
+      event.preventDefault();
+      setSidebarWidth((current) => clampSidebarWidth(current + SIDEBAR_KEYBOARD_STEP));
+    }
+    if (event.key === 'Home') {
+      event.preventDefault();
+      setSidebarWidth(MIN_SIDEBAR_WIDTH);
+    }
+    if (event.key === 'End') {
+      event.preventDefault();
+      setSidebarWidth(MAX_SIDEBAR_WIDTH);
+    }
+  }, []);
+
+  const emptyCopy = emptyEditorCopy(currentUser?.role);
+
+  function renderMainPanel() {
+    if (paperMeta) {
+      return (
+        <>
+          <header className="paper-header">
+            <div>
+              <p className="eyebrow">Current paper</p>
+              <h2>{paperMeta.title}</h2>
+              <p><FileText aria-hidden="true" size={15} /> DOI: {paperMeta.doi || 'Not provided'}</p>
+            </div>
+            <div className="paper-header__badges">
+              {activeAssignment ? <StatusPill tone={activeAssignment.status === 'approved' ? 'approved' : activeAssignment.status === 'returned' ? 'rejected' : 'info'}>{activeAssignment.status}</StatusPill> : <StatusPill tone="pending">unassigned</StatusPill>}
+              {selectedPaper?.has_edited_version ? <StatusPill tone="info">edited version</StatusPill> : null}
+            </div>
+          </header>
+          <div className="editor-toolbar">
+            <div className="editor-toolbar__summary">
+              <div className="editor-toolbar__title">Editing progress</div>
+              <div className="editor-toolbar__meta">Paragraph {currentSentenceIndex} of {totalItems}<span className="editor-toolbar__dot">/</span>{progressPercent}% through paper</div>
+            </div>
+            <div className="editor-toolbar__actions">
+              {detailResource?.refreshing ? <StatusPill tone="info">Refreshing</StatusPill> : null}
+              <StatusPill tone={dirty ? 'pending' : 'approved'}>{dirty ? 'Unsaved' : 'Saved'}</StatusPill>
+              <Button variant="secondary" icon={RotateCcw} onClick={handleUndo} disabled={readOnly || history.length === 0}>Undo</Button>
+              <Button icon={Save} onClick={handleSave} disabled={!paperId || readOnly || loading === 'save-relations'}>
+                {loading === 'save-relations' ? 'Saving...' : 'Save draft'}
+              </Button>
+              {currentUser?.role === 'annotator' ? (
+                <Button variant="success" icon={Send} onClick={handleSubmitAssignment} disabled={!canSubmit || loading === 'submit-assignment'}>
+                  {loading === 'submit-assignment' ? 'Submitting...' : 'Submit'}
+                </Button>
+              ) : null}
+            </div>
+            <div className="editor-toolbar__progress">
+              <ProgressBar value={progressPercent} label="Paper annotation progress" />
+            </div>
+          </div>
+          {editorAccessMessage ? <MessageBanner type="info" text={editorAccessMessage} /> : null}
+          {activeAssignment?.latest_review_comment ? <MessageBanner type="info" text={`Reviewer comment: ${activeAssignment.latest_review_comment}`} /> : null}
+          {warnings.length > 0 ? (
+            <div className="warning-stack">
+              {warnings.map((warning) => <MessageBanner key={warning} type="info" text={warning} />)}
+            </div>
+          ) : null}
+          <div className="paragraph-stack">
+            {paragraphs.length === 0 ? <EmptyState icon={AlertTriangle} title="No editable paragraphs" description="This paper is present, but its sentence or paragraph data is not ready yet." /> : null}
+            {paragraphs.map((paragraph) => (
+              <ParagraphEditor
+                key={paragraph.paragraph_id}
+                paperId={paperMeta.paper_id}
+                paperTitle={paperMeta.title}
+                doi={paperMeta.doi}
+                paragraph={paragraph}
+                sentences={paragraph.sentence_ids.map((sentenceId) => sentenceById.get(sentenceId)).filter((sentence): sentence is SentenceRecord => Boolean(sentence))}
+                mentionsBySentence={mentionsBySentence}
+                relations={relationsByParagraph.get(paragraph.paragraph_id) ?? []}
+                onAddPredicate={handleAddDirectPredicate}
+                onDelete={(relationId) => commitRelations((current) => current.filter((item) => item.relation_id !== relationId))}
+                onAdd={(relation) => commitRelations((current) => [...current, relation])}
+                readOnly={readOnly}
+              />
+            ))}
+          </div>
+        </>
+      );
+    }
+
+    if (initialEditorLoading) return <div className="loading-card">Loading workspace...</div>;
+
+    if (editorError) {
+      return (
+        <div className="status-card editor-empty-card">
+          <EmptyState icon={AlertTriangle} title="Editor data could not be loaded" description={editorError} />
+          <div className="button-row">
+            <Button variant="secondary" icon={RefreshCw} onClick={() => void run('refresh-editor', async () => { await ensurePapers(true); if (paperId) await ensurePaperDetail(paperId, true); })} disabled={Boolean(loading)}>Retry</Button>
+          </div>
+        </div>
+      );
+    }
+
+    if (noPapers || !paperId) {
+      return (
+        <div className="status-card editor-empty-card">
+          <EmptyState icon={ScrollText} title={emptyCopy.title} description={emptyCopy.description} />
+        </div>
+      );
+    }
+
+    return <div className="loading-card">Loading paper...</div>;
+  }
+
+  return (
+    <div
+      className={`app-shell${isResizingSidebar ? ' app-shell--resizing' : ''}`}
+      style={{ '--editor-sidebar-width': `${sidebarWidth}px` } as CSSProperties}
+    >
+      <aside className="sidebar">
+        <div className="sidebar__sticky">
+          <div className="rail-heading">
+            <span className="rail-heading__icon"><ScrollText aria-hidden="true" size={18} /></span>
+            <div>
+              <p className="eyebrow">Workspace</p>
+              <h2>Relation Editor</h2>
+            </div>
+          </div>
+          <div className="paper-picker">
+            <label className="field">
+              <span>Change paper</span>
+              <SelectControl
+                value={paperId}
+                options={paperOptions}
+                onChange={setSelectedPaperId}
+                ariaLabel="Change paper"
+                placeholder={papersResource.initialLoading ? 'Loading papers...' : 'No assigned papers'}
+                disabled={paperOptions.length === 0 || papersResource.initialLoading}
+                className="select-control--paper"
+                descriptionMode="tooltip"
+                searchable
+                searchPlaceholder="Search papers..."
+              />
+            </label>
+            {selectedPaper ? (
+              <div className="selected-paper-card" title={selectedPaper.title}>
+                <span>{selectedPaper.paper_id}</span>
+                <strong>{selectedPaper.title}</strong>
+                <small>{selectedPaper.doi || 'DOI not available'}</small>
+              </div>
+            ) : null}
+          </div>
+          <div className="rail-card">
+            <div className="rail-stat"><span>Papers</span><strong>{papers.length}</strong></div>
+            <div className="rail-stat"><span>Paragraphs</span><strong>{totalItems}</strong></div>
+            <div className="rail-stat"><span>Relations</span><strong>{relations.length}</strong></div>
+          </div>
+          <div className="status-block">
+            <StatusPill tone={dirty ? 'pending' : 'approved'}>{dirty ? 'unsaved changes' : 'all changes saved'}</StatusPill>
+            <p className="muted"><Database aria-hidden="true" size={14} /> Source: {paperMeta ? sourceLabel : 'not loaded'}</p>
+            <p className="muted">Undo steps: {history.length}</p>
+            {papersResource.refreshing || detailResource?.refreshing ? <p className="muted">Refreshing in background...</p> : null}
+            {status ? <p className="muted">{status}</p> : null}
+            <MessageBanner type={message.type} text={message.text} />
+          </div>
+        </div>
+      </aside>
+
+      <button
+        type="button"
+        className="sidebar-resizer"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize editor sidebar"
+        aria-valuemin={MIN_SIDEBAR_WIDTH}
+        aria-valuemax={MAX_SIDEBAR_WIDTH}
+        aria-valuenow={sidebarWidth}
+        aria-valuetext={`${sidebarWidth}px`}
+        title="Drag to resize sidebar"
+        onPointerDown={handleSidebarResizeStart}
+        onKeyDown={handleSidebarResizeKeyDown}
+      />
+
+      <main className="main-panel">
+        {renderMainPanel()}
+      </main>
+    </div>
+  );
+}
