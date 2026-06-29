@@ -66,7 +66,7 @@ export function VerifyEmailPage() {
     <AuthShell title="Verify email" summary={firebaseUser?.email ?? 'Check your inbox.'} message={message}>
       <div className="status-card">
         <StatusPill tone="pending" icon={MailCheck}>verification required</StatusPill>
-        <p>Open the verification email from Firebase, then refresh this page so the platform can continue your approval flow.</p>
+        <p>Verify this Firebase account before continuing. If this account was created manually by an administrator, use Resend email here, open the verification link, then refresh status.</p>
       </div>
       <div className="button-row">
         <Button variant="success" icon={RefreshCw} onClick={handleRefresh} disabled={loading === 'refresh'}>

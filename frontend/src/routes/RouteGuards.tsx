@@ -25,8 +25,8 @@ function nextRouteForSession({
   isApproved: boolean;
 }) {
   if (!hasFirebaseUser) return '/signin';
-  if (!hasProfile) return '/complete-profile';
   if (!isVerified) return '/verify-email';
+  if (!hasProfile) return '/complete-profile';
   if (!isApproved) return '/account-status';
   return '/app/editor';
 }
@@ -64,10 +64,11 @@ export function RequireFirebaseSession() {
 }
 
 export function RequireMissingProfile() {
-  const { authReady, firebaseUser, currentUser, sessionError } = useAuth();
+  const { authReady, firebaseUser, currentUser, isFirebaseVerified, sessionError } = useAuth();
   if (!authReady) return sessionError ? <SessionErrorScreen message={sessionError} /> : <LoadingScreen label="Loading session..." />;
   if (sessionError && firebaseUser && !currentUser) return <SessionErrorScreen message={sessionError} />;
   if (!firebaseUser) return <Navigate to="/signin" replace />;
+  if (!isFirebaseVerified) return <Navigate to="/verify-email" replace />;
   if (currentUser) return <Navigate to="/" replace />;
   return <Outlet />;
 }
@@ -77,8 +78,8 @@ export function RequireApprovedUser() {
   if (!authReady) return sessionError ? <SessionErrorScreen message={sessionError} /> : <LoadingScreen label="Loading session..." />;
   if (sessionError && firebaseUser && !currentUser) return <SessionErrorScreen message={sessionError} />;
   if (!firebaseUser) return <Navigate to="/signin" replace />;
+  if (!(isFirebaseVerified || currentUser?.email_verified)) return <Navigate to="/verify-email" replace />;
   if (!currentUser) return <Navigate to="/complete-profile" replace />;
-  if (!(isFirebaseVerified || currentUser.email_verified)) return <Navigate to="/verify-email" replace />;
   if (!isApproved) return <Navigate to="/account-status" replace />;
   return <Outlet />;
 }
