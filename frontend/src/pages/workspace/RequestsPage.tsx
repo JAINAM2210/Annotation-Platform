@@ -1,10 +1,12 @@
 import { useEffect, useState } from 'react';
-import { Check, Inbox, RefreshCw, ShieldCheck, X } from 'lucide-react';
+import { Check, Inbox, RotateCcw, RefreshCw, ShieldCheck, X } from 'lucide-react';
 import {
   approveAnnotatorSignupRequest,
   approveReviewerSignupRequest,
   rejectAnnotatorSignupRequest,
   rejectReviewerSignupRequest,
+  reopenAnnotatorSignupRequest,
+  reopenReviewerSignupRequest,
 } from '../../api/client';
 import { useAuth } from '../../auth/AuthContext';
 import { errorMessage, formatDate, type Message } from '../../lib/status';
@@ -45,6 +47,7 @@ function RequestList({
   onReasonChange,
   onApprove,
   onReject,
+  onReopen,
 }: {
   items: UserRead[];
   emptyText: string;
@@ -54,6 +57,7 @@ function RequestList({
   onReasonChange: (userId: string, reason: string) => void;
   onApprove: (userId: string) => void;
   onReject: (userId: string) => void;
+  onReopen: (userId: string) => void;
 }) {
   if (initialLoading) return <div className="loading-card">Loading requests...</div>;
   if (items.length === 0) return <EmptyState icon={Inbox} title={emptyText} description="New verified users will appear here when they request access." />;
@@ -89,6 +93,16 @@ function RequestList({
               </Field>
               <Button variant="success" icon={Check} onClick={() => onApprove(request.id)} disabled={Boolean(loading)}>Approve</Button>
               <Button variant="danger" icon={X} onClick={() => onReject(request.id)} disabled={Boolean(loading)}>Reject</Button>
+            </div>
+          ) : null}
+          {request.status === 'rejected' ? (
+            <div className="request-actions request-actions--reconsider">
+              <div className="request-rejection-note">
+                <span>Rejection reason</span>
+                <strong>{request.rejection_reason || 'No reason provided.'}</strong>
+              </div>
+              <Button variant="secondary" icon={RotateCcw} onClick={() => onReopen(request.id)} disabled={Boolean(loading)}>Reopen</Button>
+              <Button variant="success" icon={Check} onClick={() => onApprove(request.id)} disabled={Boolean(loading)}>Approve</Button>
             </div>
           ) : null}
         </article>
@@ -156,6 +170,20 @@ export function RequestsPage() {
     });
   }
 
+  function handleReopenAnnotator(userId: string) {
+    void run(`reopen-annotator-${userId}`, async () => {
+      const token = await getAccessToken();
+      const user = await reopenAnnotatorSignupRequest(token, userId);
+      setMessage({ type: 'success', text: `${user.email} moved back to pending` });
+      await Promise.all([
+        ensureAnnotatorRequests(requestStatus.annotator, true),
+        ensureAnnotatorRequests('pending', true),
+        ensureUsers(true).catch(() => []),
+        ensureAssignmentOptions(true).catch(() => undefined),
+      ]);
+    });
+  }
+
   function handleApproveReviewer(userId: string) {
     void run(`approve-reviewer-${userId}`, async () => {
       const token = await getAccessToken();
@@ -171,6 +199,19 @@ export function RequestsPage() {
       const user = await rejectReviewerSignupRequest(token, userId, rejectReasons[userId] ?? '');
       setMessage({ type: 'success', text: `${user.email} rejected` });
       await Promise.all([ensureReviewerRequests(requestStatus.reviewer, true), ensureUsers(true).catch(() => [])]);
+    });
+  }
+
+  function handleReopenReviewer(userId: string) {
+    void run(`reopen-reviewer-${userId}`, async () => {
+      const token = await getAccessToken();
+      const user = await reopenReviewerSignupRequest(token, userId);
+      setMessage({ type: 'success', text: `${user.email} moved back to pending` });
+      await Promise.all([
+        ensureReviewerRequests(requestStatus.reviewer, true),
+        ensureReviewerRequests('pending', true),
+        ensureUsers(true).catch(() => []),
+      ]);
     });
   }
 
@@ -201,6 +242,7 @@ export function RequestsPage() {
               onReasonChange={(userId, reason) => setRejectReasons((current) => ({ ...current, [userId]: reason }))}
               onApprove={handleApproveAnnotator}
               onReject={handleRejectAnnotator}
+              onReopen={handleReopenAnnotator}
             />
           </div>
         ) : null}
@@ -219,6 +261,7 @@ export function RequestsPage() {
               onReasonChange={(userId, reason) => setRejectReasons((current) => ({ ...current, [userId]: reason }))}
               onApprove={handleApproveReviewer}
               onReject={handleRejectReviewer}
+              onReopen={handleReopenReviewer}
             />
           </div>
         ) : null}

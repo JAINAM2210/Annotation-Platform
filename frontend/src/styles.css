@@ -1776,6 +1776,30 @@ select option:checked {
   border-top: 1px solid var(--border);
 }
 
+.request-actions--reconsider {
+  grid-template-columns: minmax(220px, 1fr) auto auto;
+  align-items: center;
+}
+
+.request-rejection-note {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.request-rejection-note span {
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.request-rejection-note strong {
+  color: var(--text-strong);
+  overflow-wrap: anywhere;
+  line-height: 1.35;
+}
+
 .workspace-table {
   max-height: 560px;
   overflow: auto;
@@ -2120,6 +2144,7 @@ textarea::placeholder {
   .add-relation-form--paragraph-custom,
   .add-relation-form--paragraph-selected,
   .request-actions,
+  .request-actions--reconsider,
   .assignment-form,
   .assignment-history-panel__top,
   .assignment-history-summary,

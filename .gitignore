@@ -24,3 +24,4 @@ frontend/.vite/
 # Logs
 *.log
 npm-debug.log*
+docs

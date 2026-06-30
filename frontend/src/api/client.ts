@@ -121,6 +121,10 @@ export async function rejectReviewerSignupRequest(token: string, userId: string,
   }));
 }
 
+export async function reopenReviewerSignupRequest(token: string, userId: string): Promise<UserRead> {
+  return readJson<UserRead>(await apiFetch(`${API_BASE}/admin/signup-requests/${userId}/reopen`, { method: 'POST', headers: authHeader(token) }));
+}
+
 export async function fetchAnnotatorSignupRequests(token: string, status: UserStatus = 'pending'): Promise<UserRead[]> {
   return readJson<UserRead[]>(await apiFetch(`${API_BASE}/reviewer/signup-requests?status=${status}`, { headers: authHeader(token) }));
 }
@@ -135,6 +139,10 @@ export async function rejectAnnotatorSignupRequest(token: string, userId: string
     headers: { ...authHeader(token), 'Content-Type': 'application/json' },
     body: JSON.stringify({ reason: reason.trim() || null }),
   }));
+}
+
+export async function reopenAnnotatorSignupRequest(token: string, userId: string): Promise<UserRead> {
+  return readJson<UserRead>(await apiFetch(`${API_BASE}/reviewer/signup-requests/${userId}/reopen`, { method: 'POST', headers: authHeader(token) }));
 }
 
 export async function fetchAdminUsers(token: string): Promise<UserRead[]> {

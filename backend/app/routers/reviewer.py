@@ -46,8 +46,8 @@ def approve_signup_request(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Signup request not found")
     if user.role != UserRole.annotator:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Only annotator requests can be approved here")
-    if user.status != UserStatus.pending:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Only pending requests can be approved")
+    if user.status not in {UserStatus.pending, UserStatus.rejected}:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Only pending or rejected requests can be approved")
 
     user.status = UserStatus.approved
     user.approved_at = datetime.now(timezone.utc)
@@ -77,6 +77,31 @@ def reject_signup_request(
     user.approved_at = None
     user.approved_by_id = current_user.id
     user.rejection_reason = payload.reason
+    db.commit()
+    db.refresh(user)
+    return user
+
+
+@router.post("/signup-requests/{user_id}/reopen", response_model=UserRead)
+def reopen_signup_request(
+    user_id: str,
+    current_user: Annotated[UserProfile, Depends(require_reviewer_or_admin)],
+    db: Annotated[Session, Depends(get_db)],
+) -> UserProfile:
+    user = db.get(UserProfile, user_id)
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Signup request not found")
+    if user.role != UserRole.annotator:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Only annotator requests can be reopened here")
+    if user.status != UserStatus.rejected:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Only rejected requests can be reopened")
+    if not user.is_active:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Inactive users must be reactivated before reopening")
+
+    user.status = UserStatus.pending
+    user.approved_at = None
+    user.approved_by_id = None
+    user.rejection_reason = None
     db.commit()
     db.refresh(user)
     return user
