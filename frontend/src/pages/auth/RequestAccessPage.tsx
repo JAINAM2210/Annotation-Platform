@@ -8,6 +8,7 @@ import { ensureFirebaseSessionPersistence, firebaseAuth } from '../../firebase';
 import { getCountryOptions, getStateOptions } from '../../lib/locations';
 import { errorMessage, type Message } from '../../lib/status';
 import { Button, Field, SelectControl } from '../../ui/Primitives';
+import { PasswordInput } from '../../ui/PasswordInput';
 import type { RegisterProfilePayload, SignupRole } from '../../types';
 import { AuthShell } from './AuthShell';
 
@@ -136,8 +137,7 @@ export function RequestAccessPage() {
               />
             </Field>
             <Field label="Password" hint="Use at least 8 characters.">
-              <input
-                type="password"
+              <PasswordInput
                 autoComplete="new-password"
                 minLength={8}
                 value={form.password}
@@ -146,8 +146,8 @@ export function RequestAccessPage() {
               />
             </Field>
             <Field label="Confirm password">
-              <input
-                type="password"
+              <PasswordInput
+                visibilityLabel="confirmed password"
                 autoComplete="new-password"
                 minLength={8}
                 value={form.confirmPassword}

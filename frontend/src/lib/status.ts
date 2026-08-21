@@ -17,6 +17,13 @@ export function formatDate(value: string | null): string {
   return new Date(value).toLocaleString();
 }
 
+export function formatCalendarDate(value: string | null): string {
+  if (!value) return '-';
+  const [year, month, day] = value.split('-').map(Number);
+  if (!year || !month || !day) return value;
+  return new Date(year, month - 1, day).toLocaleDateString();
+}
+
 export function statusClass(status: UserStatus): string {
   return `pill pill--${status}`;
 }

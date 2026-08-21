@@ -40,6 +40,11 @@ export type ParagraphRecord = {
   sentence_ids: string[];
 };
 
+export type ParagraphCommentRecord = {
+  paragraph_id: string;
+  comment_text: string;
+};
+
 export type MentionRecord = {
   mention_id: string;
   sentence_id: string;
@@ -53,6 +58,7 @@ export type MentionRecord = {
 
 export type RelationRecord = {
   relation_id: string;
+  logical_relation_id: string;
   sentence_id: string;
   paper_id: string;
   paper_title: string;
@@ -71,15 +77,50 @@ export type RelationRecord = {
   support_paragraph_id: string;
 };
 
+export type RevisionInfo = {
+  submission_id: string;
+  version: number;
+  status: SubmissionStatus;
+  parent_submission_id: string | null;
+  parent_version: number | null;
+  created_by_id: string | null;
+  editor_role: string;
+  created_at: string | null;
+};
+
+export type ModifiedRelationRecord = {
+  before: RelationRecord;
+  after: RelationRecord;
+};
+
+export type ParagraphCommentChange = {
+  paragraph_id: string;
+  before_text: string;
+  after_text: string;
+};
+
+export type RevisionChanges = {
+  parent_submission_id: string;
+  parent_version: number;
+  added: RelationRecord[];
+  removed: RelationRecord[];
+  modified: ModifiedRelationRecord[];
+  unchanged_count: number;
+  paragraph_comments: ParagraphCommentChange[];
+};
+
 export type PaperDetailResponse = {
   paper: PaperSummary;
   sentences: SentenceRecord[];
   paragraphs: ParagraphRecord[];
   mentions: MentionRecord[];
   relations: RelationRecord[];
+  paragraph_comments: ParagraphCommentRecord[];
   source: string;
   warnings: string[];
   assignment: PaperAssignmentState | null;
+  revision: RevisionInfo | null;
+  changes: RevisionChanges | null;
 };
 
 
@@ -117,8 +158,8 @@ export type RegisterProfilePayload = {
 };
 
 
-export type AssignmentStatus = 'assigned' | 'in_progress' | 'submitted' | 'returned' | 'approved' | 'cancelled';
-export type SubmissionStatus = 'draft' | 'submitted' | 'returned' | 'approved' | 'superseded';
+export type AssignmentStatus = 'assigned' | 'in_progress' | 'submitted' | 'review_in_progress' | 'returned' | 'approved' | 'cancelled';
+export type SubmissionStatus = 'draft' | 'submitted' | 'review_draft' | 'returned' | 'approved' | 'superseded';
 
 export type AssignmentRead = {
   id: string;

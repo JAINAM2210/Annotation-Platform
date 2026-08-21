@@ -17,13 +17,19 @@ from app.data_errors import DataServiceError
 from app.models import (
     DatasetInfo,
     MentionRecord,
+    ParagraphCommentRecord,
+    ParagraphCommentChange,
     ParagraphRecord,
     PaperAssignmentState,
     PaperDetailResponse,
     PaperSummary,
     RelationRecord,
+    ModifiedRelationRecord,
+    RevisionChanges,
+    RevisionInfo,
     SentenceRecord,
     UserProfile,
+    UserRole,
 )
 
 
@@ -225,7 +231,7 @@ def list_papers(db: Session, current_user: UserProfile | None = None) -> list[Pa
                          SELECT 1
                          FROM annotation_submissions sub
                          JOIN annotation_assignments aa ON aa.id = sub.assignment_id
-                         WHERE aa.paper_id = p.id AND sub.status = 'draft'
+                         WHERE aa.paper_id = p.id AND sub.status IN ('draft', 'review_draft')
                        ) AS has_edited_version
                 FROM papers p
                 WHERE p.paper_id IS NOT NULL
@@ -240,7 +246,7 @@ def list_papers(db: Session, current_user: UserProfile | None = None) -> list[Pa
                          SELECT 1
                          FROM annotation_submissions sub
                          JOIN annotation_assignments aa ON aa.id = sub.assignment_id
-                         WHERE aa.paper_id = p.id AND sub.status = 'draft'
+                         WHERE aa.paper_id = p.id AND sub.status IN ('draft', 'review_draft')
                        ) AS has_edited_version
                 FROM papers p
                 WHERE p.id IN :paper_ids AND p.paper_id IS NOT NULL
@@ -537,6 +543,7 @@ def _relation_record_from_row(
 
     return RelationRecord(
         relation_id=relation_key,
+        logical_relation_id=_row_value(row.get("logical_relation_id"), relation_uuid),
         sentence_id=sentence_id,
         paper_id=paper.paper_id,
         paper_title=paper.title,
@@ -567,6 +574,7 @@ def _load_submission_relations(
     rows = _execute(db, text(
         """
         SELECT ar.id AS relation_uuid,
+               ar.logical_relation_id,
                sr.relation_key,
                ar.sentence_id AS sentence_uuid,
                se.sentence_key,
@@ -607,12 +615,142 @@ def _load_submission_relations(
     ]
 
 
+def _load_paragraph_comments(
+    db: Session,
+    submission_id: str,
+    paragraph_uuid_to_key: dict[str, str],
+) -> list[ParagraphCommentRecord]:
+    rows = _execute(db, text(
+        """
+        SELECT paragraph_id, comment_text
+        FROM annotation_paragraph_comments
+        WHERE submission_id = :submission_id
+        ORDER BY created_at, id
+        """
+    ), {"submission_id": submission_id}).mappings().all()
+    return [
+        ParagraphCommentRecord(
+            paragraph_id=paragraph_uuid_to_key.get(_row_value(row["paragraph_id"]), _row_value(row["paragraph_id"])),
+            comment_text=_row_value(row["comment_text"]),
+        )
+        for row in rows
+    ]
+
+
+def _submission_revision(db: Session, submission_id: str) -> RevisionInfo | None:
+    row = _execute(db, text(
+        """
+        SELECT sub.id, sub.version, sub.status, sub.parent_submission_id, sub.created_by_id,
+               sub.editor_role, sub.created_at, parent.version AS parent_version
+        FROM annotation_submissions sub
+        LEFT JOIN annotation_submissions parent ON parent.id = sub.parent_submission_id
+        WHERE sub.id = :submission_id
+        """
+    ), {"submission_id": submission_id}).mappings().first()
+    if row is None:
+        return None
+    return RevisionInfo(
+        submission_id=_row_value(row["id"]),
+        version=int(row["version"] or 0),
+        status=_row_value(row["status"]),
+        parent_submission_id=_row_value(row["parent_submission_id"]) or None,
+        parent_version=int(row["parent_version"] or 0) if row["parent_version"] is not None else None,
+        created_by_id=_row_value(row["created_by_id"]) or None,
+        editor_role=_row_value(row["editor_role"]),
+        created_at=row["created_at"],
+    )
+
+
+_RELATION_COMPARISON_FIELDS = (
+    "sentence_id",
+    "subject_text",
+    "subject_type",
+    "predicate",
+    "object_text",
+    "object_type",
+    "confidence",
+    "accepted",
+    "evidence_text",
+    "relation_origin",
+    "inherited_from",
+    "support_sentence_ids",
+    "support_paragraph_id",
+)
+
+
+def _relation_changed(before: RelationRecord, after: RelationRecord) -> bool:
+    return any(getattr(before, field) != getattr(after, field) for field in _RELATION_COMPARISON_FIELDS)
+
+
+def _revision_changes(
+    db: Session,
+    revision: RevisionInfo | None,
+    current_relations: list[RelationRecord],
+    current_comments: list[ParagraphCommentRecord],
+    paper: PaperDbIdentity,
+    sentence_uuid_to_key: dict[str, str],
+    paragraph_uuid_to_key: dict[str, str],
+    sentence_uuid_to_paragraph_key: dict[str, str],
+) -> RevisionChanges | None:
+    if revision is None or not revision.parent_submission_id or revision.parent_version is None:
+        return None
+
+    parent_relations = _load_submission_relations(
+        db,
+        revision.parent_submission_id,
+        paper,
+        sentence_uuid_to_key,
+        paragraph_uuid_to_key,
+        sentence_uuid_to_paragraph_key,
+    )
+    parent_comments = _load_paragraph_comments(db, revision.parent_submission_id, paragraph_uuid_to_key)
+    before_by_id = {relation.logical_relation_id: relation for relation in parent_relations}
+    after_by_id = {relation.logical_relation_id: relation for relation in current_relations}
+
+    added = [after_by_id[key] for key in after_by_id.keys() - before_by_id.keys()]
+    removed = [before_by_id[key] for key in before_by_id.keys() - after_by_id.keys()]
+    modified: list[ModifiedRelationRecord] = []
+    unchanged_count = 0
+    for key in before_by_id.keys() & after_by_id.keys():
+        before = before_by_id[key]
+        after = after_by_id[key]
+        if _relation_changed(before, after):
+            modified.append(ModifiedRelationRecord(before=before, after=after))
+        else:
+            unchanged_count += 1
+
+    comment_before = {comment.paragraph_id: comment.comment_text for comment in parent_comments}
+    comment_after = {comment.paragraph_id: comment.comment_text for comment in current_comments}
+    comment_changes = [
+        ParagraphCommentChange(
+            paragraph_id=paragraph_id,
+            before_text=comment_before.get(paragraph_id, ""),
+            after_text=comment_after.get(paragraph_id, ""),
+        )
+        for paragraph_id in sorted(comment_before.keys() | comment_after.keys())
+        if comment_before.get(paragraph_id, "") != comment_after.get(paragraph_id, "")
+    ]
+    relation_sort_key = lambda relation: (relation.support_paragraph_id, relation.subject_text, relation.predicate, relation.object_text)
+    added.sort(key=relation_sort_key)
+    removed.sort(key=relation_sort_key)
+    modified.sort(key=lambda change: relation_sort_key(change.after))
+    return RevisionChanges(
+        parent_submission_id=revision.parent_submission_id,
+        parent_version=revision.parent_version,
+        added=added,
+        removed=removed,
+        modified=modified,
+        unchanged_count=unchanged_count,
+        paragraph_comments=comment_changes,
+    )
+
+
 def _latest_assignment_submission(db: Session, assignment_id: str):
     return _execute(db, text(
         """
-        SELECT id, status
+        SELECT id, version, status, parent_submission_id, created_by_id, editor_role, created_at, submitted_at
         FROM annotation_submissions
-        WHERE assignment_id = :assignment_id AND status IN ('draft', 'submitted', 'returned', 'approved')
+        WHERE assignment_id = :assignment_id AND status IN ('draft', 'submitted', 'review_draft', 'returned', 'approved')
         ORDER BY version DESC, created_at DESC, id DESC
         LIMIT 1
         """
@@ -626,14 +764,15 @@ def _load_assignment_relations(
     sentence_uuid_to_key: dict[str, str],
     paragraph_uuid_to_key: dict[str, str],
     sentence_uuid_to_paragraph_key: dict[str, str],
-) -> tuple[list[RelationRecord], str]:
+) -> tuple[list[RelationRecord], str, str | None]:
     if assignment is None:
-        return [], "none"
+        return [], "none", None
     latest = _latest_assignment_submission(db, assignment.assignment_id)
     if latest is None:
-        return [], "none"
-    relations = _load_submission_relations(db, _row_value(latest["id"]), paper, sentence_uuid_to_key, paragraph_uuid_to_key, sentence_uuid_to_paragraph_key)
-    return relations, _row_value(latest["status"], "submission")
+        return [], "none", None
+    submission_id = _row_value(latest["id"])
+    relations = _load_submission_relations(db, submission_id, paper, sentence_uuid_to_key, paragraph_uuid_to_key, sentence_uuid_to_paragraph_key)
+    return relations, _row_value(latest["status"], "submission"), submission_id
 
 def _load_suggested_relations(
     db: Session,
@@ -644,6 +783,7 @@ def _load_suggested_relations(
 ) -> list[RelationRecord]:
     base_sql = """
         SELECT sr.id AS relation_uuid,
+               sr.id AS logical_relation_id,
                sr.relation_key,
                sr.sentence_id AS sentence_uuid,
                se.sentence_key,
@@ -711,13 +851,14 @@ def _paper_detail_payload(
     mentions, mention_key_to_uuid = _load_mentions(db, paper, sentence_uuid_to_key, warnings)
 
     source = "source"
+    active_submission_id = submission_id
     relations: list[RelationRecord]
     try:
         if submission_id:
             relations = _load_submission_relations(db, submission_id, paper, sentence_uuid_to_key, paragraph_uuid_to_key, sentence_uuid_to_paragraph_key)
             source = "submission"
         else:
-            relations, source = _load_assignment_relations(db, assignment_state, paper, sentence_uuid_to_key, paragraph_uuid_to_key, sentence_uuid_to_paragraph_key)
+            relations, source, active_submission_id = _load_assignment_relations(db, assignment_state, paper, sentence_uuid_to_key, paragraph_uuid_to_key, sentence_uuid_to_paragraph_key)
             if not relations:
                 relations = _load_suggested_relations(db, paper, sentence_uuid_to_key, paragraph_uuid_to_key, sentence_uuid_to_paragraph_key)
                 source = "source" if relations else "none"
@@ -726,20 +867,42 @@ def _paper_detail_payload(
         relations = []
         source = "none"
 
+    paragraph_comments: list[ParagraphCommentRecord] = []
+    if active_submission_id:
+        try:
+            paragraph_comments = _load_paragraph_comments(db, active_submission_id, paragraph_uuid_to_key)
+        except SQLAlchemyError:
+            warnings.append("Paragraph comments could not be loaded for this submission.")
+
+    revision = _submission_revision(db, active_submission_id) if active_submission_id else None
+    changes = _revision_changes(
+        db,
+        revision,
+        relations,
+        paragraph_comments,
+        paper,
+        sentence_uuid_to_key,
+        paragraph_uuid_to_key,
+        sentence_uuid_to_paragraph_key,
+    )
+
     if not relations:
         warnings.append("No relation suggestions are available for this paper yet. You can still inspect the paper text.")
 
     del sentence_key_to_uuid, paragraph_key_to_uuid, mention_key_to_uuid
-    summary = PaperSummary(paper_id=paper.paper_id, title=paper.title, doi=paper.doi, has_edited_version=source in {"draft", "submission"}, assignment=assignment_state)
+    summary = PaperSummary(paper_id=paper.paper_id, title=paper.title, doi=paper.doi, has_edited_version=source in {"draft", "review_draft", "submission"}, assignment=assignment_state)
     return PaperDetailResponse(
         paper=summary,
         sentences=sentences,
         paragraphs=paragraphs,
         mentions=mentions,
         relations=relations,
+        paragraph_comments=paragraph_comments,
         source=source,
         warnings=warnings,
         assignment=assignment_state,
+        revision=revision,
+        changes=changes,
     )
 
 
@@ -824,7 +987,7 @@ def save_custom_schema_predicate(db: Session, predicate: str, current_user: User
 
 def _identity_maps_for_paper(db: Session, paper_uuid: str) -> dict[str, dict[str, str]]:
     sentences = _execute(db, text("SELECT id, sentence_key FROM sentences WHERE paper_id = :paper_uuid"), {"paper_uuid": paper_uuid}).mappings().all()
-    paragraphs = _execute(db, text("SELECT id, paragraph_key FROM paragraphs WHERE paper_id = :paper_uuid"), {"paper_uuid": paper_uuid}).mappings().all()
+    paragraphs = _execute(db, text("SELECT id, paragraph_key, text FROM paragraphs WHERE paper_id = :paper_uuid"), {"paper_uuid": paper_uuid}).mappings().all()
     mentions = _execute(db, text(
         """
         SELECT em.id, em.mention_key
@@ -852,9 +1015,19 @@ def _identity_maps_for_paper(db: Session, paper_uuid: str) -> dict[str, dict[str
                 mapping[key] = db_id
         return mapping
 
+    paragraph_text: dict[str, str] = {}
+    for row in paragraphs:
+        db_id = _row_value(row["id"])
+        text_value = _row_value(row["text"])
+        paragraph_text[db_id] = text_value
+        paragraph_key = _row_value(row["paragraph_key"])
+        if paragraph_key:
+            paragraph_text[paragraph_key] = text_value
+
     return {
         "sentences": build(sentences, "sentence_key"),
         "paragraphs": build(paragraphs, "paragraph_key"),
+        "paragraph_text": paragraph_text,
         "mentions": build(mentions, "mention_key"),
         "suggested": build(suggested, "relation_key"),
     }
@@ -869,17 +1042,60 @@ def _extract_manual_mention_ids(relation: RelationRecord, mention_map: dict[str,
     return None, None
 
 
-def save_relations(db: Session, paper_id: str, relations: list[RelationRecord], editor_mode: str, current_user: UserProfile) -> str:
+def save_relations(
+    db: Session,
+    paper_id: str,
+    relations: list[RelationRecord],
+    paragraph_comments: list[ParagraphCommentRecord],
+    editor_mode: str,
+    current_user: UserProfile,
+    base_submission_id: str | None = None,
+) -> str:
     del editor_mode
     from app.services import workflow_service
 
     paper = _paper_identity(db, paper_id)
     assignment = workflow_service.ensure_editable_assignment_for_paper(db, paper.uuid, current_user)
     assignment_id = assignment.id
+    editor_role = "reviewer" if current_user.role in {UserRole.reviewer, UserRole.admin} else "annotator"
+    draft_status = "review_draft" if editor_role == "reviewer" else "draft"
+    latest = _latest_assignment_submission(db, assignment_id)
+    latest_submission_id = _row_value(latest["id"]) if latest else None
+    if latest_submission_id and not base_submission_id:
+        raise DataServiceError(
+            409,
+            "base_submission_required",
+            "The draft was not linked to the revision currently open in the editor.",
+            "Refresh the editor and save again so newer work cannot be overwritten.",
+            paper_id,
+        )
+    if base_submission_id and base_submission_id != latest_submission_id:
+        raise DataServiceError(
+            409,
+            "stale_submission",
+            "A newer annotation revision is available.",
+            "Refresh the editor, review the newer changes, and save again.",
+            paper_id,
+        )
+    if editor_role == "reviewer" and latest is None:
+        raise DataServiceError(
+            400,
+            "submitted_revision_required",
+            "The reviewer cannot create a draft before the annotator submits work.",
+            "Ask the annotator to save and submit a draft first.",
+            paper_id,
+        )
+    parent_submission_id = None
+    if latest is not None:
+        parent_submission_id = (
+            _row_value(latest["parent_submission_id"]) or None
+            if _row_value(latest["status"]) == draft_status
+            else latest_submission_id
+        )
     maps = _identity_maps_for_paper(db, paper.uuid)
     now = datetime.now(timezone.utc)
     try:
-        workflow_service.mark_assignment_draft_saved(db, assignment_id)
+        workflow_service.mark_assignment_draft_saved(db, assignment_id, editor_role)
         version = _execute(db, text(
             """
             SELECT COALESCE(MAX(version), 0) + 1
@@ -890,20 +1106,35 @@ def save_relations(db: Session, paper_id: str, relations: list[RelationRecord], 
         submission_id = str(uuid4())
         _execute(db, text(
             """
-            INSERT INTO annotation_submissions (id, assignment_id, version, status, created_at, submitted_at)
-            VALUES (:id, :assignment_id, :version, 'draft', :now, NULL)
+            INSERT INTO annotation_submissions (
+                id, assignment_id, version, status, parent_submission_id,
+                created_by_id, editor_role, created_at, submitted_at
+            ) VALUES (
+                :id, :assignment_id, :version, :status, :parent_submission_id,
+                :created_by_id, :editor_role, :now, :submitted_at
+            )
             """
-        ), {"id": submission_id, "assignment_id": assignment_id, "version": int(version or 1), "now": now})
+        ), {
+            "id": submission_id,
+            "assignment_id": assignment_id,
+            "version": int(version or 1),
+            "status": draft_status,
+            "parent_submission_id": parent_submission_id,
+            "created_by_id": current_user.id,
+            "editor_role": editor_role,
+            "submitted_at": latest["submitted_at"] if editor_role == "reviewer" and latest is not None else None,
+            "now": now,
+        })
 
         json_expr = "CAST(:raw_payload AS JSONB)" if db.get_bind().dialect.name == "postgresql" else ":raw_payload"
         insert_relation_sql = text(f"""
             INSERT INTO annotation_submission_relations (
-                id, submission_id, suggested_relation_id, action, sentence_id, support_paragraph_id,
+                id, submission_id, logical_relation_id, suggested_relation_id, action, sentence_id, support_paragraph_id,
                 subject_mention_id, object_mention_id, subject_text, subject_type, predicate,
                 object_text, object_type, confidence, accepted, evidence_text, relation_origin,
                 inherited_from, raw_payload
             ) VALUES (
-                :id, :submission_id, :suggested_relation_id, :action, :sentence_id, :support_paragraph_id,
+                :id, :submission_id, :logical_relation_id, :suggested_relation_id, :action, :sentence_id, :support_paragraph_id,
                 :subject_mention_id, :object_mention_id, :subject_text, :subject_type, :predicate,
                 :object_text, :object_type, :confidence, :accepted, :evidence_text, :relation_origin,
                 :inherited_from, {json_expr}
@@ -913,13 +1144,18 @@ def save_relations(db: Session, paper_id: str, relations: list[RelationRecord], 
         for relation in relations:
             relation_row_id = str(uuid4())
             suggested_relation_id = maps["suggested"].get(relation.relation_id)
+            logical_relation_id = relation.logical_relation_id.strip() or suggested_relation_id or str(uuid4())
             subject_mention_id, object_mention_id = _extract_manual_mention_ids(relation, maps["mentions"])
             sentence_id = maps["sentences"].get(relation.sentence_id) if relation.sentence_id else None
             paragraph_id = maps["paragraphs"].get(relation.support_paragraph_id) if relation.support_paragraph_id else None
+            evidence_text = relation.evidence_text
+            if relation.relation_id.startswith("custom_") and paragraph_id:
+                evidence_text = maps["paragraph_text"].get(relation.support_paragraph_id, evidence_text)
             action = "add" if suggested_relation_id is None or relation.relation_id.startswith(("manual_", "custom_")) else "keep"
             _execute(db, insert_relation_sql, {
                 "id": relation_row_id,
                 "submission_id": submission_id,
+                "logical_relation_id": logical_relation_id,
                 "suggested_relation_id": suggested_relation_id,
                 "action": action,
                 "sentence_id": sentence_id,
@@ -933,10 +1169,13 @@ def save_relations(db: Session, paper_id: str, relations: list[RelationRecord], 
                 "object_type": relation.object_type,
                 "confidence": relation.confidence,
                 "accepted": relation.accepted,
-                "evidence_text": relation.evidence_text,
+                "evidence_text": evidence_text,
                 "relation_origin": relation.relation_origin,
                 "inherited_from": relation.inherited_from,
-                "raw_payload": json.dumps(relation.model_dump()),
+                "raw_payload": json.dumps(relation.model_copy(update={
+                    "evidence_text": evidence_text,
+                    "logical_relation_id": logical_relation_id,
+                }).model_dump()),
             })
 
             support_keys = [item.strip() for item in relation.support_sentence_ids.split(";") if item.strip()]
@@ -953,14 +1192,84 @@ def save_relations(db: Session, paper_id: str, relations: list[RelationRecord], 
                     """
                 ), {"relation_id": relation_row_id, "sentence_id": support_uuid})
 
+        for paragraph_comment in paragraph_comments:
+            comment_text = paragraph_comment.comment_text.strip()
+            paragraph_id = maps["paragraphs"].get(paragraph_comment.paragraph_id)
+            if not comment_text or not paragraph_id:
+                continue
+            _execute(db, text(
+                """
+                INSERT INTO annotation_paragraph_comments (
+                    id, submission_id, paragraph_id, author_id, comment_text, created_at, updated_at
+                ) VALUES (
+                    :id, :submission_id, :paragraph_id, :author_id, :comment_text, :now, :now
+                )
+                """
+            ), {
+                "id": str(uuid4()),
+                "submission_id": submission_id,
+                "paragraph_id": paragraph_id,
+                "author_id": current_user.id,
+                "comment_text": comment_text,
+                "now": now,
+            })
+
+        _execute(db, text(
+            """
+            UPDATE annotation_submissions
+            SET status = 'superseded'
+            WHERE assignment_id = :assignment_id
+              AND id <> :submission_id
+              AND status = :draft_status
+            """
+        ), {
+            "assignment_id": assignment_id,
+            "submission_id": submission_id,
+            "draft_status": draft_status,
+        })
+
         db.commit()
     except SQLAlchemyError as exc:
         db.rollback()
         raise _db_error(
-            "Relations could not be saved to the platform database.",
+            "The annotation draft could not be saved to the platform database.",
             code="relation_save_failed",
-            hint="Your unsaved work is still visible in the browser. Check annotation_submissions and annotation_submission_relations in Aiven, then save again.",
+            hint="Your unsaved work is still visible in the browser. Check annotation_submissions, annotation_submission_relations, and annotation_paragraph_comments in Aiven, then save again.",
             paper_id=paper_id,
         ) from exc
 
     return f"postgresql://annotation_submissions/{submission_id}"
+
+
+def save_reviewer_paragraph_comments(
+    db: Session,
+    paper_id: str,
+    paragraph_comments: list[ParagraphCommentRecord],
+    current_user: UserProfile,
+) -> str:
+    """Compatibility endpoint that creates an immutable reviewer draft snapshot."""
+    from app.services import workflow_service
+
+    paper = _paper_identity(db, paper_id)
+    assignment = workflow_service.ensure_paper_visible(db, paper.uuid, current_user)
+    if assignment is None:
+        raise DataServiceError(400, "assignment_required", "No assignment is available for this paper.", "Open a paper with an existing submission.", paper_id)
+
+    latest = _latest_assignment_submission(db, assignment.id)
+    if latest is None:
+        raise DataServiceError(400, "submission_required", "No saved submission is available for comments.", "Ask the annotator to save a draft first.", paper_id)
+    submission_id = _row_value(latest["id"])
+    detail = paper_detail_for_submission(
+        db,
+        submission_id,
+        workflow_service.assignment_state_from_read(assignment),
+    )
+    return save_relations(
+        db,
+        paper_id,
+        detail.relations,
+        paragraph_comments,
+        "paragraph",
+        current_user,
+        submission_id,
+    )

@@ -21,6 +21,12 @@ export function mentionTypeValue(mention: MentionRecord) {
   return mention.schema_type || mention.ner_label || 'Mention';
 }
 
+function newLogicalRelationId() {
+  return typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+    ? crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
 export function typedMentionsOnly(mentions: MentionRecord[]) {
   return mentions.filter((mention) => mention.schema_type && mention.schema_type.trim().length > 0);
 }
@@ -142,6 +148,7 @@ export function buildManualRelation(args: {
 
   const relation: RelationRecord = {
     relation_id: `manual_${Date.now()}_${args.subject.mention_id}_${args.object.mention_id}`,
+    logical_relation_id: newLogicalRelationId(),
     sentence_id: supportSentenceIds[0] ?? args.subject.sentence_id,
     paper_id: args.paperId,
     paper_title: args.paperTitle,
@@ -168,12 +175,14 @@ export function buildCustomParagraphRelation(args: {
   paperTitle: string;
   doi: string;
   paragraphId: string;
+  paragraphText: string;
   subjectText: string;
   predicate: string;
   objectText: string;
 }) {
   const relation: RelationRecord = {
     relation_id: `custom_${Date.now()}_${args.paragraphId}`,
+    logical_relation_id: newLogicalRelationId(),
     sentence_id: '',
     paper_id: args.paperId,
     paper_title: args.paperTitle,
@@ -185,7 +194,7 @@ export function buildCustomParagraphRelation(args: {
     object_type: 'custom',
     confidence: 1.0,
     accepted: true,
-    evidence_text: '',
+    evidence_text: args.paragraphText,
     relation_origin: '',
     inherited_from: '',
     support_sentence_ids: '',

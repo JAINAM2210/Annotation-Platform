@@ -6,6 +6,7 @@ import type {
   ExportFormat,
   PaperAssignmentHistoryResponse,
   PaperDetailResponse,
+  ParagraphCommentRecord,
   PaperSummary,
   RegisterProfilePayload,
   RelationRecord,
@@ -251,12 +252,33 @@ export async function savePaperRelations(
   token: string,
   paperId: string,
   relations: RelationRecord[],
-  editorMode: 'sentence' | 'paragraph'
+  paragraphComments: ParagraphCommentRecord[],
+  editorMode: 'sentence' | 'paragraph',
+  baseSubmissionId?: string | null
 ) {
   return readJson<{ saved_to: string }>(await apiFetch(`${API_BASE}/paper/${paperId}/relations/save`, {
     method: 'POST',
     headers: { ...authHeader(token), 'Content-Type': 'application/json' },
-    body: JSON.stringify({ dataset: 'raw', paper_id: paperId, relations, editor_mode: editorMode }),
+    body: JSON.stringify({
+      dataset: 'raw',
+      paper_id: paperId,
+      relations,
+      paragraph_comments: paragraphComments,
+      editor_mode: editorMode,
+      base_submission_id: baseSubmissionId ?? null,
+    }),
+  }));
+}
+
+export async function saveParagraphComments(
+  token: string,
+  paperId: string,
+  paragraphComments: ParagraphCommentRecord[]
+) {
+  return readJson<{ saved_to: string }>(await apiFetch(`${API_BASE}/paper/${paperId}/paragraph-comments/save`, {
+    method: 'POST',
+    headers: { ...authHeader(token), 'Content-Type': 'application/json' },
+    body: JSON.stringify({ paper_id: paperId, paragraph_comments: paragraphComments }),
   }));
 }
 

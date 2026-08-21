@@ -8,41 +8,42 @@ import type { ExportFormat, PaperSummary } from '../../types';
 import { useWorkspaceData } from './WorkspaceDataContext';
 
 export function ExportsPage() {
-  const { currentUser, getAccessToken } = useAuth();
+  const { getAccessToken } = useAuth();
   const {
     assignments,
-    assignmentOptions,
     exportPaperId: paperId,
     setExportPaperId: setPaperId,
     exportFormat: format,
     setExportFormat: setFormat,
     ensureAssignments,
-    ensureAssignmentOptions,
   } = useWorkspaceData();
   const [loading, setLoading] = useState('');
   const [message, setMessage] = useState<Message>({ type: 'info', text: 'Exports ready' });
 
   const paperOptionsSource: PaperSummary[] = useMemo(() => {
-    if (currentUser?.role === 'admin' || currentUser?.role === 'reviewer') return assignmentOptions.data.papers;
-    return assignments.data
-      .filter((assignment) => assignment.status === 'approved')
-      .map((assignment) => ({
-        paper_id: assignment.paper_id,
-        title: assignment.paper_title,
-        doi: assignment.doi,
-        has_edited_version: false,
-        assignment: {
-          assignment_id: assignment.id,
-          status: assignment.status,
-          annotator_id: assignment.annotator_id,
-          reviewer_id: assignment.reviewer_id,
-          latest_submission_id: assignment.latest_submission_id,
-          latest_submission_status: assignment.latest_submission_status,
-          latest_submission_version: assignment.latest_submission_version,
-          latest_review_comment: assignment.latest_review_comment,
-        },
-      }));
-  }, [assignmentOptions.data.papers, assignments.data, currentUser?.role]);
+    const latestApprovedByPaper = new Map<string, typeof assignments.data[number]>();
+    assignments.data.forEach((assignment) => {
+      if (assignment.status === 'approved' && !latestApprovedByPaper.has(assignment.paper_id)) {
+        latestApprovedByPaper.set(assignment.paper_id, assignment);
+      }
+    });
+    return Array.from(latestApprovedByPaper.values()).map((assignment) => ({
+      paper_id: assignment.paper_id,
+      title: assignment.paper_title,
+      doi: assignment.doi,
+      has_edited_version: false,
+      assignment: {
+        assignment_id: assignment.id,
+        status: assignment.status,
+        annotator_id: assignment.annotator_id,
+        reviewer_id: assignment.reviewer_id,
+        latest_submission_id: assignment.latest_submission_id,
+        latest_submission_status: assignment.latest_submission_status,
+        latest_submission_version: assignment.latest_submission_version,
+        latest_review_comment: assignment.latest_review_comment,
+      },
+    }));
+  }, [assignments.data]);
 
   const paperOptions = useMemo(() => [...paperOptionsSource]
     .sort((left, right) => (left.title || left.paper_id).localeCompare(right.title || right.paper_id, undefined, { sensitivity: 'base' }))
@@ -57,7 +58,6 @@ export function ExportsPage() {
 
   async function refreshExportPapers(force = false) {
     await ensureAssignments(force);
-    if (currentUser?.role === 'admin' || currentUser?.role === 'reviewer') await ensureAssignmentOptions(force);
   }
 
   async function run(label: string, action: () => Promise<void>) {
@@ -73,7 +73,7 @@ export function ExportsPage() {
 
   useEffect(() => {
     void run('load-export-papers', () => refreshExportPapers(false));
-  }, [currentUser?.role, ensureAssignmentOptions, ensureAssignments]);
+  }, [ensureAssignments]);
 
   useEffect(() => {
     if (paperId && paperOptionsSource.some((paper) => paper.paper_id === paperId)) return;
@@ -97,10 +97,10 @@ export function ExportsPage() {
     });
   }
 
-  const approvedCount = assignments.data.filter((assignment) => assignment.status === 'approved').length;
-  const loadError = assignments.error || assignmentOptions.error;
-  const isInitialLoading = assignments.initialLoading || ((currentUser?.role === 'admin' || currentUser?.role === 'reviewer') && assignmentOptions.initialLoading);
-  const isRefreshing = assignments.refreshing || assignmentOptions.refreshing;
+  const approvedCount = paperOptionsSource.length;
+  const loadError = assignments.error;
+  const isInitialLoading = assignments.initialLoading;
+  const isRefreshing = assignments.refreshing;
 
   return (
     <main className="workspace-page">

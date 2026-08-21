@@ -172,6 +172,22 @@ export function ReviewPage() {
                   ))}
                 </div>
               ) : null}
+              {detail.paper.paragraph_comments.length > 0 ? (
+                <section className="review-paragraph-comments">
+                  <h4>Annotator paragraph comments</h4>
+                  <div className="review-paragraph-comments__list">
+                    {detail.paper.paragraph_comments.map((paragraphComment) => {
+                      const paragraph = detail.paper.paragraphs.find((item) => item.paragraph_id === paragraphComment.paragraph_id);
+                      return (
+                        <div key={paragraphComment.paragraph_id} className="review-paragraph-comment">
+                          <span>Paragraph {paragraph?.paragraph_index ?? paragraphComment.paragraph_id}</span>
+                          <p>{paragraphComment.comment_text}</p>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </section>
+              ) : null}
               <DataTable>
                 <table>
                   <thead><tr><th>Subject</th><th>Predicate</th><th>Object</th><th>Evidence</th></tr></thead>
@@ -187,7 +203,7 @@ export function ReviewPage() {
                   </tbody>
                 </table>
               </DataTable>
-              {detail.submission.status === 'submitted' ? (
+              {['submitted', 'review_draft'].includes(detail.submission.status) ? (
                 <div className="review-actions">
                   <Field label="Reviewer comment">
                     <textarea value={comment} onChange={(event) => setComment(event.target.value)} placeholder="Add approval note or return reason" rows={3} />

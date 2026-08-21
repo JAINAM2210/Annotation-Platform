@@ -5,18 +5,25 @@ import {
   createAssignment,
 } from '../../api/client';
 import { useAuth } from '../../auth/AuthContext';
-import { errorMessage, formatDate, type Message } from '../../lib/status';
+import { errorMessage, formatCalendarDate, formatDate, type Message } from '../../lib/status';
 import { Button, DataTable, EmptyState, Field, MessageBanner, SectionHeader, SelectControl, StatusPill } from '../../ui/Primitives';
 import type { AssignmentRead, AssignmentStatus } from '../../types';
 import { useWorkspaceData } from './WorkspaceDataContext';
 
-const activeAssignmentStatuses: AssignmentStatus[] = ['assigned', 'in_progress', 'submitted', 'returned'];
+const activeAssignmentStatuses: AssignmentStatus[] = ['assigned', 'in_progress', 'submitted', 'review_in_progress', 'returned'];
 
 function assignmentTone(status: AssignmentStatus) {
   if (status === 'approved') return 'approved' as const;
   if (status === 'cancelled' || status === 'returned') return 'rejected' as const;
-  if (status === 'submitted') return 'info' as const;
+  if (status === 'submitted' || status === 'review_in_progress') return 'info' as const;
   return 'pending' as const;
+}
+
+function localDateInputValue(date = new Date()) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
 }
 
 export function AssignmentsPage() {
@@ -37,6 +44,8 @@ export function AssignmentsPage() {
   const canAssign = Boolean(mayManageAnnotators || mayManageReviewers || currentUser?.role === 'admin' || currentUser?.role === 'reviewer');
   const [loading, setLoading] = useState('');
   const [message, setMessage] = useState<Message>({ type: 'info', text: 'Assignments ready' });
+  const [todayDate, setTodayDate] = useState(localDateInputValue);
+  const hasPastDueDate = Boolean(form.due_at && form.due_at < todayDate);
 
   const paperOptions = useMemo(() => [...assignmentOptions.data.papers]
     .sort((left, right) => (left.title || left.paper_id).localeCompare(right.title || right.paper_id, undefined, { sensitivity: 'base' }))
@@ -112,13 +121,24 @@ export function AssignmentsPage() {
     });
   }, [canAssign, ensureAssignmentHistory, selectedAssignmentHistoryPaperId]);
 
+  useEffect(() => {
+    const intervalId = window.setInterval(() => setTodayDate(localDateInputValue()), 60000);
+    return () => window.clearInterval(intervalId);
+  }, []);
+
   function handleCreateAssignment() {
+    const currentDate = localDateInputValue();
+    if (form.due_at && form.due_at < currentDate) {
+      setTodayDate(currentDate);
+      setMessage({ type: 'error', text: 'Due date cannot be earlier than today.' });
+      return;
+    }
     void run('create-assignment', async () => {
       const token = await getAccessToken();
       const assignment = await createAssignment(token, {
         paper_id: form.paper_id,
         annotator_id: form.annotator_id,
-        due_at: form.due_at ? new Date(form.due_at).toISOString() : null,
+        due_at: form.due_at || null,
       });
       setMessage({ type: 'success', text: `${assignment.paper_id} assigned to ${assignment.annotator_name}` });
       setAssignmentForm((current) => ({ ...current, paper_id: '' }));
@@ -183,9 +203,15 @@ export function AssignmentsPage() {
               />
             </Field>
             <Field label="Due date">
-              <input type="date" value={form.due_at} onChange={(event) => setAssignmentForm((current) => ({ ...current, due_at: event.target.value }))} />
+              <input
+                type="date"
+                min={todayDate}
+                value={form.due_at}
+                aria-invalid={hasPastDueDate}
+                onChange={(event) => setAssignmentForm((current) => ({ ...current, due_at: event.target.value }))}
+              />
             </Field>
-            <Button icon={CalendarDays} onClick={handleCreateAssignment} disabled={!form.paper_id || !form.annotator_id || Boolean(loading)}>Assign</Button>
+            <Button icon={CalendarDays} onClick={handleCreateAssignment} disabled={!form.paper_id || !form.annotator_id || hasPastDueDate || Boolean(loading)}>Assign</Button>
           </div>
         </section>
       ) : null}
@@ -249,7 +275,7 @@ export function AssignmentsPage() {
                             <td><strong>{assignment.reviewer_name || '-'}</strong><span>{assignment.reviewer_email}</span></td>
                             <td><StatusPill tone={assignmentTone(assignment.status)}>{assignment.status}</StatusPill></td>
                             <td>{assignment.latest_submission_version ? `v${assignment.latest_submission_version}` : '-'}</td>
-                            <td>{formatDate(assignment.due_at)}</td>
+                            <td>{formatCalendarDate(assignment.due_at)}</td>
                             <td>{formatDate(assignment.started_at)}</td>
                             <td>{formatDate(assignment.submitted_at)}</td>
                             <td>{formatDate(assignment.completed_at)}</td>
@@ -280,7 +306,7 @@ export function AssignmentsPage() {
                     <td><strong>{assignment.reviewer_name || '-'}</strong><span>{assignment.reviewer_email}</span></td>
                     <td><StatusPill tone={assignmentTone(assignment.status)}>{assignment.status}</StatusPill></td>
                     <td>{assignment.latest_submission_version ? `v${assignment.latest_submission_version}` : '-'}</td>
-                    <td>{formatDate(assignment.due_at)}</td>
+                    <td>{formatCalendarDate(assignment.due_at)}</td>
                     <td>{formatDate(assignment.submitted_at)}</td>
                     <td>
                       {canAssign && assignment.status !== 'approved' && assignment.status !== 'cancelled' ? (

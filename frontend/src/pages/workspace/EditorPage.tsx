@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent } from 'react';
-import { AlertTriangle, Database, FileText, RefreshCw, RotateCcw, Save, ScrollText, Send } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, Database, FileText, MessageSquareReply, RefreshCw, RotateCcw, Save, ScrollText, Send } from 'lucide-react';
 import {
   addDirectSchemaPredicate,
+  approveReviewSubmission,
+  returnReviewSubmission,
   savePaperRelations,
   submitAssignment,
 } from '../../api/client';
@@ -14,14 +16,30 @@ import type {
   MentionRecord,
   PaperAssignmentState,
   PaperDetailResponse,
+  ParagraphCommentRecord,
   ParagraphRecord,
   RelationRecord,
+  RevisionChanges,
+  RevisionInfo,
   SentenceRecord,
 } from '../../types';
 import { useWorkspaceData, type EditorDraftState } from './WorkspaceDataContext';
 
 function relationsEqual(left: RelationRecord[], right: RelationRecord[]) {
   return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function paragraphCommentsEqual(left: Record<string, string>, right: Record<string, string>) {
+  const normalized = (comments: Record<string, string>) => Object.fromEntries(
+    Object.entries(comments)
+      .filter(([, comment]) => comment.trim().length > 0)
+      .sort(([leftId], [rightId]) => leftId.localeCompare(rightId))
+  );
+  return JSON.stringify(normalized(left)) === JSON.stringify(normalized(right));
+}
+
+function paragraphCommentMap(comments: ParagraphCommentRecord[] | undefined) {
+  return Object.fromEntries((comments ?? []).map((comment) => [comment.paragraph_id, comment.comment_text]));
 }
 
 function editableRelations(items: RelationRecord[]) {
@@ -64,13 +82,66 @@ function emptyEditorCopy(role?: string) {
 }
 
 function draftFromDetail(detail: PaperDetailResponse | null | undefined): EditorDraftState {
+  const paragraphComments = paragraphCommentMap(detail?.paragraph_comments);
   return {
     relations: detail?.relations ?? [],
     baselineRelations: detail?.relations ?? [],
+    paragraphComments,
+    baselineParagraphComments: paragraphComments,
     history: [],
     dirty: false,
     currentSentenceIndex: detail?.sentences[0]?.sentence_index ?? (detail?.paragraphs.length ? 1 : 0),
   };
+}
+
+function relationText(relation: RelationRecord) {
+  return `${relation.subject_text} — ${relation.predicate} — ${relation.object_text}`;
+}
+
+function RevisionComparison({ revision, changes }: { revision: RevisionInfo; changes: RevisionChanges }) {
+  const changedCount = changes.added.length + changes.removed.length + changes.modified.length;
+  return (
+    <details className="revision-comparison" open={changedCount > 0 || changes.paragraph_comments.length > 0}>
+      <summary>
+        <span>
+          <strong>Changes since v{changes.parent_version}</strong>
+          <small>Current v{revision.version} · {revision.editor_role || 'editor'} revision</small>
+        </span>
+        <span className="revision-comparison__counts">
+          <StatusPill tone="approved">+{changes.added.length}</StatusPill>
+          <StatusPill tone="info">~{changes.modified.length}</StatusPill>
+          <StatusPill tone="rejected">−{changes.removed.length}</StatusPill>
+          {changes.paragraph_comments.length > 0 ? <StatusPill tone="pending">{changes.paragraph_comments.length} comment</StatusPill> : null}
+        </span>
+      </summary>
+      <div className="revision-comparison__body">
+        {changedCount === 0 && changes.paragraph_comments.length === 0 ? <p className="muted">No content changed from the previous handoff.</p> : null}
+        {changes.added.length > 0 ? (
+          <section><h4>Added relations</h4>{changes.added.map((relation) => <p key={relation.logical_relation_id}><span className="change-mark change-mark--added">Added</span>{relationText(relation)}</p>)}</section>
+        ) : null}
+        {changes.modified.length > 0 ? (
+          <section><h4>Modified relations</h4>{changes.modified.map((change) => (
+            <p key={change.after.logical_relation_id}>
+              <span className="change-mark change-mark--modified">Before</span>{relationText(change.before)}
+              <span className="change-arrow">→</span>
+              <span className="change-mark change-mark--modified">After</span>{relationText(change.after)}
+            </p>
+          ))}</section>
+        ) : null}
+        {changes.removed.length > 0 ? (
+          <section><h4>Removed relations</h4>{changes.removed.map((relation) => <p key={relation.logical_relation_id}><span className="change-mark change-mark--removed">Removed</span>{relationText(relation)}</p>)}</section>
+        ) : null}
+        {changes.paragraph_comments.length > 0 ? (
+          <section><h4>Paragraph comment changes</h4>{changes.paragraph_comments.map((change) => (
+            <p key={change.paragraph_id}>
+              <strong>{change.paragraph_id}</strong>: {change.before_text || '(empty)'} <span className="change-arrow">→</span> {change.after_text || '(empty)'}
+            </p>
+          ))}</section>
+        ) : null}
+        <p className="muted">{changes.unchanged_count} unchanged relation{changes.unchanged_count === 1 ? '' : 's'}.</p>
+      </div>
+    </details>
+  );
 }
 
 export function EditorPage() {
@@ -91,6 +162,7 @@ export function EditorPage() {
   const [status, setStatus] = useState('');
   const [sidebarWidth, setSidebarWidth] = useState(initialSidebarWidth);
   const [isResizingSidebar, setIsResizingSidebar] = useState(false);
+  const [reviewDecisionComment, setReviewDecisionComment] = useState('');
 
   const papers = papersResource.data;
   const selectedPaper = papers.find((paper) => paper.paper_id === paperId);
@@ -103,9 +175,12 @@ export function EditorPage() {
   const mentions = detail?.mentions ?? [];
   const sourceLabel = detail?.source ?? 'source';
   const warnings = detail?.warnings ?? [];
+  const revision = detail?.revision ?? null;
+  const changes = detail?.changes ?? null;
   const draftState = editorDrafts[paperId] ?? draftFromDetail(detail);
   const relations = draftState.relations;
   const baselineRelations = draftState.baselineRelations;
+  const paragraphComments = draftState.paragraphComments;
   const history = draftState.history;
   const dirty = draftState.dirty;
   const currentSentenceIndex = draftState.currentSentenceIndex;
@@ -224,20 +299,40 @@ export function EditorPage() {
   const totalItems = paragraphs.length;
   const progressPercent = totalItems > 0 ? Math.min(100, Math.round((currentSentenceIndex / totalItems) * 100)) : 0;
   const activeAssignment = assignmentState ?? selectedPaper?.assignment ?? null;
-  const editableAssignmentStatuses = new Set(['assigned', 'in_progress', 'returned']);
-  const canEdit = Boolean(activeAssignment && editableAssignmentStatuses.has(activeAssignment.status) && currentUser?.role !== 'reviewer');
-  const readOnly = !canEdit;
-  const canSubmit = Boolean(canEdit && currentUser?.role === 'annotator' && activeAssignment?.latest_submission_status === 'draft' && !dirty);
+  const annotatorEditableStatuses = new Set(['assigned', 'in_progress', 'returned']);
+  const reviewerEditableStatuses = new Set(['submitted', 'review_in_progress']);
+  const isReviewerEditor = currentUser?.role === 'reviewer' || currentUser?.role === 'admin';
+  const canEditRelations = Boolean(
+    activeAssignment
+    && (
+      (currentUser?.role === 'annotator' && annotatorEditableStatuses.has(activeAssignment.status))
+      || (isReviewerEditor && reviewerEditableStatuses.has(activeAssignment.status))
+    )
+  );
+  const canEditComments = canEditRelations;
+  const readOnly = !canEditRelations;
+  const commentsReadOnly = !canEditComments;
+  const canSubmit = Boolean(canEditRelations && currentUser?.role === 'annotator' && activeAssignment?.latest_submission_status === 'draft' && !dirty);
+  const canCompleteReview = Boolean(
+    canEditRelations
+    && isReviewerEditor
+    && ['submitted', 'review_draft'].includes(activeAssignment?.latest_submission_status ?? '')
+    && !dirty
+  );
   const editorAccessMessage = !activeAssignment
     ? 'Create an assignment before editing this paper.'
+    : isReviewerEditor && canEditRelations
+      ? 'You are editing a reviewer draft. Save it before returning or approving this version.'
     : activeAssignment.status === 'submitted'
-      ? 'This assignment has been submitted for review and is read-only.'
+      ? 'This assignment has been submitted for review.'
+      : activeAssignment.status === 'review_in_progress'
+        ? 'The reviewer is currently editing this submission.'
       : activeAssignment.status === 'approved'
         ? 'This assignment has been approved and is read-only.'
         : activeAssignment.status === 'cancelled'
           ? 'This assignment was cancelled and is read-only.'
-          : currentUser?.role === 'reviewer'
-            ? 'Reviewers inspect submitted work in the Review tab; direct editing is disabled.'
+          : isReviewerEditor
+            ? 'No submitted revision is ready for reviewer editing yet.'
             : '';
   const paperOptions = useMemo(() => [...papers]
     .sort((left, right) => (left.title || left.paper_id).localeCompare(right.title || right.paper_id, undefined, { sensitivity: 'base' }))
@@ -251,7 +346,7 @@ export function EditorPage() {
     })), [papers]);
 
   const commitRelations = (updater: (current: RelationRecord[]) => RelationRecord[]) => {
-    if (readOnly || !paperId) return;
+    if (!canEditRelations || !paperId) return;
     setEditorDraft(paperId, (current) => {
       const base = current ?? draftState;
       const next = updater(base.relations);
@@ -259,27 +354,54 @@ export function EditorPage() {
         ...base,
         relations: next,
         history: [...base.history, base.relations],
-        dirty: !relationsEqual(editableRelations(next), editableRelations(base.baselineRelations)),
+        dirty: !relationsEqual(editableRelations(next), editableRelations(base.baselineRelations))
+          || !paragraphCommentsEqual(base.paragraphComments, base.baselineParagraphComments),
+      };
+    });
+  };
+
+  const commitParagraphComment = (paragraphId: string, commentText: string) => {
+    if (!canEditComments || !paperId) return;
+    setEditorDraft(paperId, (current) => {
+      const base = current ?? draftState;
+      const nextComments = { ...base.paragraphComments, [paragraphId]: commentText };
+      return {
+        ...base,
+        paragraphComments: nextComments,
+        dirty: !relationsEqual(editableRelations(base.relations), editableRelations(base.baselineRelations))
+          || !paragraphCommentsEqual(nextComments, base.baselineParagraphComments),
       };
     });
   };
 
   async function handleSave() {
-    if (!paperId || readOnly) return;
+    if (!paperId || !canEditRelations) return;
     await run('save-relations', async () => {
       const token = await getAccessToken();
       const currentRelations = editableRelations(relations);
-      const result = await savePaperRelations(token, paperId, currentRelations, 'paragraph');
+      const currentParagraphComments = Object.entries(paragraphComments)
+        .filter(([, commentText]) => commentText.trim().length > 0)
+        .map(([paragraphId, commentText]) => ({ paragraph_id: paragraphId, comment_text: commentText }));
+      const result = await savePaperRelations(
+        token,
+        paperId,
+        currentRelations,
+        currentParagraphComments,
+        'paragraph',
+        revision?.submission_id ?? activeAssignment?.latest_submission_id ?? null,
+      );
       setStatus(`Saved to ${result.saved_to}`);
       setEditorDraft(paperId, (current) => ({
         ...(current ?? draftState),
         relations: currentRelations,
         baselineRelations: currentRelations,
+        paragraphComments,
+        baselineParagraphComments: paragraphComments,
         history: [],
         dirty: false,
       }));
       await refreshEditorAfterWorkflowChange(paperId);
-      setMessage({ type: 'success', text: 'Draft saved' });
+      setMessage({ type: 'success', text: isReviewerEditor ? 'Reviewer draft saved' : 'Draft saved' });
     });
   }
 
@@ -290,6 +412,28 @@ export function EditorPage() {
       await submitAssignment(token, activeAssignment.assignment_id);
       await refreshEditorAfterWorkflowChange(paperId);
       setMessage({ type: 'success', text: 'Submitted for review' });
+    });
+  }
+
+  async function handleReturnToAnnotator() {
+    if (!activeAssignment?.latest_submission_id || !canCompleteReview) return;
+    await run('return-submission', async () => {
+      const token = await getAccessToken();
+      await returnReviewSubmission(token, activeAssignment.latest_submission_id!, reviewDecisionComment);
+      setReviewDecisionComment('');
+      await refreshEditorAfterWorkflowChange(paperId);
+      setMessage({ type: 'success', text: 'Returned to the annotator with this revision preserved' });
+    });
+  }
+
+  async function handleApproveReview() {
+    if (!activeAssignment?.latest_submission_id || !canCompleteReview) return;
+    await run('approve-submission', async () => {
+      const token = await getAccessToken();
+      await approveReviewSubmission(token, activeAssignment.latest_submission_id!, reviewDecisionComment);
+      setReviewDecisionComment('');
+      await refreshEditorAfterWorkflowChange(paperId);
+      setMessage({ type: 'success', text: 'Latest reviewer-visible revision approved as final' });
     });
   }
 
@@ -308,7 +452,8 @@ export function EditorPage() {
         ...base,
         relations: previous,
         history: base.history.slice(0, -1),
-        dirty: !relationsEqual(editableRelations(previous), editableRelations(base.baselineRelations)),
+        dirty: !relationsEqual(editableRelations(previous), editableRelations(base.baselineRelations))
+          || !paragraphCommentsEqual(base.paragraphComments, base.baselineParagraphComments),
       };
     });
   }
@@ -383,14 +528,24 @@ export function EditorPage() {
             <div className="editor-toolbar__actions">
               {detailResource?.refreshing ? <StatusPill tone="info">Refreshing</StatusPill> : null}
               <StatusPill tone={dirty ? 'pending' : 'approved'}>{dirty ? 'Unsaved' : 'Saved'}</StatusPill>
-              <Button variant="secondary" icon={RotateCcw} onClick={handleUndo} disabled={readOnly || history.length === 0}>Undo</Button>
-              <Button icon={Save} onClick={handleSave} disabled={!paperId || readOnly || loading === 'save-relations'}>
+              <Button variant="secondary" icon={RotateCcw} onClick={handleUndo} disabled={!canEditRelations || history.length === 0}>Undo</Button>
+              <Button icon={Save} onClick={handleSave} disabled={!paperId || !canEditRelations || loading === 'save-relations'}>
                 {loading === 'save-relations' ? 'Saving...' : 'Save draft'}
               </Button>
               {currentUser?.role === 'annotator' ? (
                 <Button variant="success" icon={Send} onClick={handleSubmitAssignment} disabled={!canSubmit || loading === 'submit-assignment'}>
                   {loading === 'submit-assignment' ? 'Submitting...' : 'Submit'}
                 </Button>
+              ) : null}
+              {isReviewerEditor ? (
+                <>
+                  <Button variant="danger" icon={MessageSquareReply} onClick={handleReturnToAnnotator} disabled={!canCompleteReview || loading === 'return-submission'}>
+                    {loading === 'return-submission' ? 'Returning...' : 'Return'}
+                  </Button>
+                  <Button variant="success" icon={CheckCircle2} onClick={handleApproveReview} disabled={!canCompleteReview || loading === 'approve-submission'}>
+                    {loading === 'approve-submission' ? 'Approving...' : 'Approve final'}
+                  </Button>
+                </>
               ) : null}
             </div>
             <div className="editor-toolbar__progress">
@@ -399,6 +554,19 @@ export function EditorPage() {
           </div>
           {editorAccessMessage ? <MessageBanner type="info" text={editorAccessMessage} /> : null}
           {activeAssignment?.latest_review_comment ? <MessageBanner type="info" text={`Reviewer comment: ${activeAssignment.latest_review_comment}`} /> : null}
+          {isReviewerEditor && canEditRelations ? (
+            <label className="review-decision-editor">
+              <span>Return / approval note</span>
+              <textarea
+                value={reviewDecisionComment}
+                onChange={(event) => setReviewDecisionComment(event.target.value)}
+                placeholder="Optional note saved with the return or approval decision"
+                rows={2}
+              />
+              {dirty ? <small>Save the reviewer draft before returning or approving.</small> : null}
+            </label>
+          ) : null}
+          {revision && changes ? <RevisionComparison revision={revision} changes={changes} /> : null}
           {warnings.length > 0 ? (
             <div className="warning-stack">
               {warnings.map((warning) => <MessageBanner key={warning} type="info" text={warning} />)}
@@ -416,10 +584,16 @@ export function EditorPage() {
                 sentences={paragraph.sentence_ids.map((sentenceId) => sentenceById.get(sentenceId)).filter((sentence): sentence is SentenceRecord => Boolean(sentence))}
                 mentionsBySentence={mentionsBySentence}
                 relations={relationsByParagraph.get(paragraph.paragraph_id) ?? []}
+                comment={paragraphComments[paragraph.paragraph_id] ?? ''}
                 onAddPredicate={handleAddDirectPredicate}
-                onDelete={(relationId) => commitRelations((current) => current.filter((item) => item.relation_id !== relationId))}
+                onDelete={(relationId) => commitRelations((current) => current.filter((item) => (item.logical_relation_id || item.relation_id) !== relationId))}
                 onAdd={(relation) => commitRelations((current) => [...current, relation])}
+                onUpdate={(relation) => commitRelations((current) => current.map((item) => (
+                  item.logical_relation_id === relation.logical_relation_id ? relation : item
+                )))}
+                onCommentChange={(commentText) => commitParagraphComment(paragraph.paragraph_id, commentText)}
                 readOnly={readOnly}
+                commentReadOnly={commentsReadOnly}
               />
             ))}
           </div>

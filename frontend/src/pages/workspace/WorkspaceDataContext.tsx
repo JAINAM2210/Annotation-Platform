@@ -52,6 +52,8 @@ type AssignmentFormState = {
 export type EditorDraftState = {
   relations: RelationRecord[];
   baselineRelations: RelationRecord[];
+  paragraphComments: Record<string, string>;
+  baselineParagraphComments: Record<string, string>;
   history: RelationRecord[][];
   dirty: boolean;
   currentSentenceIndex: number;
@@ -116,7 +118,7 @@ function isFresh(resource: Pick<WorkspaceResource<unknown>, 'lastLoadedAt'>) {
 
 const emptyAssignmentOptions: AssignmentOptionsResponse = { papers: [], annotators: [] };
 const statuses: UserStatus[] = ['pending', 'approved', 'rejected'];
-const submissionStatuses: SubmissionStatus[] = ['draft', 'submitted', 'returned', 'approved', 'superseded'];
+const submissionStatuses: SubmissionStatus[] = ['draft', 'submitted', 'review_draft', 'returned', 'approved', 'superseded'];
 
 function makeUserRequestResources() {
   return statuses.reduce((acc, status) => {
@@ -174,6 +176,8 @@ export function WorkspaceDataProvider({ children }: { children: ReactNode }) {
         [paperId]: {
           relations: detail.relations,
           baselineRelations: detail.relations,
+          paragraphComments: Object.fromEntries(detail.paragraph_comments.map((comment) => [comment.paragraph_id, comment.comment_text])),
+          baselineParagraphComments: Object.fromEntries(detail.paragraph_comments.map((comment) => [comment.paragraph_id, comment.comment_text])),
           history: [],
           dirty: false,
           currentSentenceIndex: detail.sentences[0]?.sentence_index ?? 1,

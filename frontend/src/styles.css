@@ -161,6 +161,7 @@ a {
 .status-tabs button,
 .mention-button,
 .relation-pill__delete,
+.relation-pill__edit,
 .sidebar-resizer,
 .select-control__button,
 .select-control__option {
@@ -228,7 +229,8 @@ a {
 .icon-button:hover,
 .status-tabs button:hover,
 .mention-button:hover,
-.relation-pill__delete:hover {
+.relation-pill__delete:hover,
+.relation-pill__edit:hover {
   border-color: var(--selected-border);
   box-shadow: 0 3px 10px var(--shadow);
   transform: translateY(-1px);
@@ -292,6 +294,43 @@ a:focus-visible {
   border: 1px solid var(--border-strong);
   border-radius: 8px;
   background: var(--surface);
+}
+
+.password-input {
+  position: relative;
+  width: 100%;
+}
+
+.password-input input {
+  padding-right: 46px;
+}
+
+.password-input__toggle {
+  position: absolute;
+  top: 50%;
+  right: 5px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted-strong);
+  cursor: pointer;
+  transform: translateY(-50%);
+}
+
+.password-input__toggle:hover {
+  background: var(--surface-muted);
+  color: var(--text-strong);
+}
+
+.password-input__toggle:focus-visible {
+  outline: 3px solid rgba(96, 165, 250, 0.32);
+  outline-offset: 1px;
 }
 
 .field select,
@@ -1055,6 +1094,7 @@ select option:checked {
 }
 
 .workspace-nav a {
+  position: relative;
   display: inline-flex;
   align-items: center;
   gap: 7px;
@@ -1064,6 +1104,26 @@ select option:checked {
   font-size: 0.9rem;
   font-weight: 900;
   text-decoration: none;
+}
+
+.nav-notification {
+  position: absolute;
+  top: -9px;
+  right: -5px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 5px;
+  border: 2px solid var(--surface);
+  border-radius: 999px;
+  background: #dc2626;
+  color: #fff;
+  font-size: 0.68rem;
+  font-weight: 900;
+  line-height: 1;
+  box-shadow: 0 2px 6px var(--shadow);
 }
 
 .workspace-nav a.active {
@@ -1367,6 +1427,104 @@ select option:checked {
   flex-wrap: wrap;
 }
 
+.review-decision-editor,
+.revision-comparison {
+  margin: 0 0 16px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.review-decision-editor {
+  display: grid;
+  gap: 7px;
+  padding: 13px 14px;
+}
+
+.review-decision-editor > span {
+  color: var(--text-strong);
+  font-size: 0.86rem;
+  font-weight: 900;
+}
+
+.review-decision-editor textarea {
+  resize: vertical;
+}
+
+.review-decision-editor small {
+  color: var(--warning-text);
+  font-weight: 800;
+}
+
+.revision-comparison > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 13px 14px;
+  cursor: pointer;
+}
+
+.revision-comparison > summary > span:first-child {
+  display: grid;
+  gap: 3px;
+}
+
+.revision-comparison > summary strong {
+  color: var(--text-strong);
+}
+
+.revision-comparison > summary small {
+  color: var(--muted);
+}
+
+.revision-comparison__counts {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.revision-comparison__body {
+  display: grid;
+  gap: 12px;
+  padding: 0 14px 14px;
+  border-top: 1px solid var(--border);
+}
+
+.revision-comparison__body section {
+  display: grid;
+  gap: 7px;
+  padding-top: 12px;
+}
+
+.revision-comparison__body h4,
+.revision-comparison__body p {
+  margin: 0;
+}
+
+.revision-comparison__body p {
+  color: var(--muted-strong);
+  font-size: 0.84rem;
+  line-height: 1.5;
+}
+
+.change-mark {
+  display: inline-flex;
+  margin-right: 7px;
+  padding: 2px 6px;
+  border-radius: 999px;
+  font-size: 0.68rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.change-mark--added { background: var(--success-bg); color: var(--success-text); }
+.change-mark--modified { background: var(--info-bg); color: var(--info-text); }
+.change-mark--removed { background: var(--danger-bg); color: var(--danger-text); }
+.change-arrow { margin: 0 8px; color: var(--muted); font-weight: 900; }
+
 .warning-stack {
   display: grid;
   gap: 8px;
@@ -1465,6 +1623,38 @@ select option:checked {
   border-top: 1px solid var(--border);
 }
 
+.paragraph-comment {
+  display: grid;
+  gap: 7px;
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+
+.paragraph-comment__label {
+  color: var(--text-strong);
+  font-size: 0.88rem;
+  font-weight: 900;
+}
+
+.paragraph-comment textarea {
+  width: 100%;
+  min-height: 84px;
+  resize: vertical;
+  line-height: 1.5;
+}
+
+.paragraph-comment textarea[readonly] {
+  background: var(--surface-soft);
+  color: var(--muted-strong);
+}
+
+.paragraph-comment__hint {
+  color: var(--muted);
+  font-size: 0.76rem;
+  font-weight: 700;
+}
+
 .relation-panel {
   display: grid;
   gap: 10px;
@@ -1533,6 +1723,38 @@ select option:checked {
   border: none;
   background: transparent;
   box-shadow: none;
+}
+
+.relation-pill__edit {
+  width: 24px;
+  height: 24px;
+  margin-left: 2px;
+  border: none;
+  background: transparent;
+  box-shadow: none;
+}
+
+.relation-inline-editor {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--selected-border);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.relation-inline-editor__heading {
+  display: grid;
+  gap: 3px;
+}
+
+.relation-inline-editor__heading strong {
+  color: var(--text-strong);
+}
+
+.relation-inline-editor__heading span {
+  color: var(--muted);
+  font-size: 0.76rem;
 }
 
 .relation-composer {
@@ -1856,6 +2078,26 @@ select option:checked {
   gap: 12px;
 }
 
+.assignment-form input[type="date"] {
+  cursor: pointer;
+  transition: border-color 140ms ease, box-shadow 140ms ease, background-color 140ms ease;
+}
+
+.assignment-form input[type="date"]:hover {
+  border-color: var(--selected-border);
+  background: var(--surface);
+  box-shadow: 0 4px 14px var(--shadow);
+}
+
+.assignment-form input[type="date"]:focus {
+  border-color: var(--selected-border);
+  box-shadow: 0 4px 14px var(--shadow);
+}
+
+.assignment-form input[type="date"]::-webkit-calendar-picker-indicator {
+  cursor: pointer;
+}
+
 .assignment-history-panel {
   display: grid;
   gap: 13px;
@@ -2005,6 +2247,45 @@ select option:checked {
 .review-comments {
   display: grid;
   gap: 8px;
+}
+
+.review-paragraph-comments {
+  display: grid;
+  gap: 9px;
+}
+
+.review-paragraph-comments h4 {
+  margin: 0;
+  color: var(--text-strong);
+  font-size: 0.92rem;
+}
+
+.review-paragraph-comments__list {
+  display: grid;
+  gap: 8px;
+}
+
+.review-paragraph-comment {
+  display: grid;
+  gap: 5px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.review-paragraph-comment span {
+  color: var(--muted-strong);
+  font-size: 0.75rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.review-paragraph-comment p {
+  margin: 0;
+  color: var(--text);
+  line-height: 1.5;
+  white-space: pre-wrap;
 }
 
 .review-comments .message,

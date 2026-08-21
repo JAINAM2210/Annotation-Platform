@@ -32,9 +32,10 @@ from app.models import (
 from app.services import db_editor_service
 
 
-ASSIGNMENT_ACTIVE_STATUSES = ("assigned", "in_progress", "submitted", "returned")
+ASSIGNMENT_ACTIVE_STATUSES = ("assigned", "in_progress", "submitted", "review_in_progress", "returned")
 ASSIGNMENT_EDITABLE_STATUSES = ("assigned", "in_progress", "returned")
-ASSIGNMENT_VISIBLE_STATUSES = ("assigned", "in_progress", "submitted", "returned", "approved")
+ASSIGNMENT_REVIEW_EDITABLE_STATUSES = ("submitted", "review_in_progress")
+ASSIGNMENT_VISIBLE_STATUSES = ("assigned", "in_progress", "submitted", "review_in_progress", "returned", "approved")
 SUBMISSION_REVIEW_STATUSES = ("submitted", "returned", "approved")
 
 
@@ -110,7 +111,7 @@ def _latest_submission(db: Session, assignment_id: str, statuses: tuple[str, ...
     if statuses:
         statement = text(
             """
-            SELECT id, version, status, created_at, submitted_at
+            SELECT id, version, status, parent_submission_id, created_by_id, editor_role, created_at, submitted_at
             FROM annotation_submissions
             WHERE assignment_id = :assignment_id AND status IN :statuses
             ORDER BY version DESC, created_at DESC, id DESC
@@ -120,7 +121,7 @@ def _latest_submission(db: Session, assignment_id: str, statuses: tuple[str, ...
         return _execute(db, statement, {"assignment_id": assignment_id, "statuses": statuses}).mappings().first()
     return _execute(db, text(
         """
-        SELECT id, version, status, created_at, submitted_at
+        SELECT id, version, status, parent_submission_id, created_by_id, editor_role, created_at, submitted_at
         FROM annotation_submissions
         WHERE assignment_id = :assignment_id
         ORDER BY version DESC, created_at DESC, id DESC
@@ -129,18 +130,21 @@ def _latest_submission(db: Session, assignment_id: str, statuses: tuple[str, ...
     ), {"assignment_id": assignment_id}).mappings().first()
 
 
-def _latest_review_comment(db: Session, submission_id: str | None) -> str | None:
-    if not submission_id:
+def _latest_review_comment(db: Session, assignment_id: str | None) -> str | None:
+    if not assignment_id:
         return None
     row = _execute(db, text(
         """
-        SELECT comment
-        FROM review_decisions
-        WHERE submission_id = :submission_id AND comment IS NOT NULL AND trim(comment) <> ''
-        ORDER BY created_at DESC, id DESC
+        SELECT decision.comment
+        FROM review_decisions decision
+        JOIN annotation_submissions sub ON sub.id = decision.submission_id
+        WHERE sub.assignment_id = :assignment_id
+          AND decision.comment IS NOT NULL
+          AND trim(decision.comment) <> ''
+        ORDER BY decision.created_at DESC, decision.id DESC
         LIMIT 1
         """
-    ), {"submission_id": submission_id}).first()
+    ), {"assignment_id": assignment_id}).first()
     return _row_value(row[0]) if row else None
 
 
@@ -187,7 +191,7 @@ def _assignment_read_from_row(db: Session, row) -> AssignmentRead:
         latest_submission_id=latest_submission_id,
         latest_submission_status=_row_value(latest["status"]) if latest else None,
         latest_submission_version=int(latest["version"] or 0) if latest else None,
-        latest_review_comment=_latest_review_comment(db, latest_submission_id),
+        latest_review_comment=_latest_review_comment(db, _row_value(row["id"])),
     )
 
 
@@ -289,7 +293,7 @@ def assignment_options(db: Session, current_user: UserProfile) -> AssignmentOpti
             paper_id=_row_value(row["paper_id"]),
             title=_row_value(row["title"]),
             doi=_row_value(row["doi"]),
-            has_edited_version=bool(assignment and assignment.latest_submission_status == "draft"),
+            has_edited_version=bool(assignment and assignment.latest_submission_status in {"draft", "review_draft"}),
             assignment=assignment_state_from_read(assignment),
         ))
 
@@ -335,7 +339,7 @@ def paper_assignment_history(db: Session, paper_id: str, current_user: UserProfi
             paper_id=_row_value(paper["paper_id"]),
             title=_row_value(paper["title"]),
             doi=_row_value(paper["doi"]),
-            has_edited_version=bool(active_assignment and active_assignment.latest_submission_status == "draft"),
+            has_edited_version=bool(active_assignment and active_assignment.latest_submission_status in {"draft", "review_draft"}),
             assignment=assignment_state_from_read(active_assignment),
         ),
         assignments=assignments,
@@ -345,6 +349,9 @@ def paper_assignment_history(db: Session, paper_id: str, current_user: UserProfi
 def create_assignment(db: Session, payload: AssignmentCreateRequest, current_user: UserProfile) -> AssignmentRead:
     if current_user.role not in {UserRole.reviewer, UserRole.admin}:
         raise _forbidden("Reviewer or admin privileges are required")
+    now = utc_now()
+    if payload.due_at is not None and payload.due_at < now.date():
+        raise _bad_request("Assignment due date cannot be earlier than today")
     annotator = db.get(UserProfile, payload.annotator_id)
     if annotator is None:
         raise _not_found("Annotator not found")
@@ -356,7 +363,6 @@ def create_assignment(db: Session, payload: AssignmentCreateRequest, current_use
         raise _bad_request("This paper already has an active assignment")
 
     assignment_id = str(uuid4())
-    now = utc_now()
     try:
         _execute(db, text(
             """
@@ -458,22 +464,27 @@ def ensure_editable_assignment_for_paper(db: Session, paper_uuid: str, current_u
     if assignment is None:
         raise _forbidden("Create or open an active assignment before saving annotations")
     _ensure_assignment_owner(assignment, current_user)
-    if assignment.status not in ASSIGNMENT_EDITABLE_STATUSES:
-        raise _bad_request(f"This assignment is {assignment.status} and cannot be edited")
-    if current_user.role == UserRole.reviewer and assignment.reviewer_id == current_user.id:
-        raise _forbidden("Reviewers cannot edit submitted annotation content directly")
+    if current_user.role == UserRole.annotator:
+        if assignment.status not in ASSIGNMENT_EDITABLE_STATUSES:
+            raise _bad_request(f"This assignment is {assignment.status} and cannot be edited by the annotator")
+    elif current_user.role in {UserRole.reviewer, UserRole.admin}:
+        if assignment.status not in ASSIGNMENT_REVIEW_EDITABLE_STATUSES:
+            raise _bad_request(f"This assignment is {assignment.status} and cannot be edited by the reviewer")
+    else:
+        raise _forbidden("This account cannot edit annotation submissions")
     return assignment
 
 
-def mark_assignment_draft_saved(db: Session, assignment_id: str) -> None:
+def mark_assignment_draft_saved(db: Session, assignment_id: str, editor_role: str) -> None:
+    next_status = "review_in_progress" if editor_role == "reviewer" else "in_progress"
     _execute(db, text(
         """
         UPDATE annotation_assignments
-        SET status = CASE WHEN status IN ('assigned', 'returned') THEN 'in_progress' ELSE status END,
+        SET status = :next_status,
             started_at = COALESCE(started_at, :now)
         WHERE id = :assignment_id
         """
-    ), {"assignment_id": assignment_id, "now": utc_now()})
+    ), {"assignment_id": assignment_id, "next_status": next_status, "now": utc_now()})
 
 
 def submit_assignment(db: Session, assignment_id: str, current_user: UserProfile) -> SubmitResponse:
@@ -493,7 +504,7 @@ def submit_assignment(db: Session, assignment_id: str, current_user: UserProfile
             """
             UPDATE annotation_submissions
             SET status = 'superseded'
-            WHERE assignment_id = :assignment_id AND id <> :submission_id AND status IN ('draft', 'submitted', 'returned')
+            WHERE assignment_id = :assignment_id AND id <> :submission_id AND status = 'draft'
             """
         ), {"assignment_id": assignment_id, "submission_id": submission_id})
         _execute(db, text("UPDATE annotation_submissions SET status = 'submitted', submitted_at = :now WHERE id = :submission_id"), {"submission_id": submission_id, "now": now})
@@ -524,11 +535,19 @@ def list_review_submissions(db: Session, current_user: UserProfile, status_filte
     if status_filter not in SUBMISSION_REVIEW_STATUSES:
         raise _bad_request("Unsupported review status")
     where_owner = "" if current_user.role == UserRole.admin else "AND aa.reviewer_id = :reviewer_id"
+    status_clause = "sub.status IN ('submitted', 'review_draft')" if status_filter == "submitted" else "sub.status = :status"
+    latest_clause = """
+        AND NOT EXISTS (
+            SELECT 1 FROM annotation_submissions newer
+            WHERE newer.assignment_id = sub.assignment_id
+              AND (newer.version > sub.version OR (newer.version = sub.version AND newer.created_at > sub.created_at))
+        )
+    """ if status_filter == "submitted" else ""
     rows = _execute(db, text(f"""
         SELECT sub.id, sub.assignment_id, sub.version, sub.status, sub.created_at, sub.submitted_at
         FROM annotation_submissions sub
         JOIN annotation_assignments aa ON aa.id = sub.assignment_id
-        WHERE sub.status = :status {where_owner}
+        WHERE {status_clause} {latest_clause} {where_owner}
         ORDER BY sub.submitted_at DESC NULLS LAST, sub.created_at DESC, sub.version DESC
     """), {"status": status_filter, "reviewer_id": current_user.id}).mappings().all()
     return [_submission_summary_from_row(db, row) for row in rows]
@@ -537,7 +556,7 @@ def list_review_submissions(db: Session, current_user: UserProfile, status_filte
 def _submission_row(db: Session, submission_id: str):
     row = _execute(db, text(
         """
-        SELECT id, assignment_id, version, status, created_at, submitted_at
+        SELECT id, assignment_id, version, status, parent_submission_id, created_by_id, editor_role, created_at, submitted_at
         FROM annotation_submissions
         WHERE id = :submission_id
         """
@@ -571,8 +590,11 @@ def return_submission(db: Session, submission_id: str, payload: ReviewDecisionRe
     row = _submission_row(db, submission_id)
     summary = _submission_summary_from_row(db, row)
     _ensure_reviewer_owner(summary.assignment, current_user)
-    if summary.status != "submitted":
-        raise _bad_request("Only submitted work can be returned")
+    if summary.status not in {"submitted", "review_draft"}:
+        raise _bad_request("Only submitted work or the current reviewer draft can be returned")
+    latest = _latest_submission(db, summary.assignment.id)
+    if latest is None or _row_value(latest["id"]) != submission_id:
+        raise _bad_request("A newer revision exists. Refresh the editor before returning this work.")
     now = utc_now()
     try:
         _execute(db, text(
@@ -595,8 +617,11 @@ def approve_submission(db: Session, submission_id: str, payload: ReviewDecisionR
     row = _submission_row(db, submission_id)
     summary = _submission_summary_from_row(db, row)
     _ensure_reviewer_owner(summary.assignment, current_user)
-    if summary.status != "submitted":
-        raise _bad_request("Only submitted work can be approved")
+    if summary.status not in {"submitted", "review_draft"}:
+        raise _bad_request("Only submitted work or the current reviewer draft can be approved")
+    latest = _latest_submission(db, summary.assignment.id)
+    if latest is None or _row_value(latest["id"]) != submission_id:
+        raise _bad_request("A newer revision exists. Refresh the editor before approving this work.")
     now = utc_now()
     try:
         _copy_submission_to_final_annotations(db, submission_id, current_user.id, now)
@@ -711,10 +736,25 @@ def export_final_annotations(db: Session, paper_id: str, export_format: str, cur
 
     rows = _execute(db, text(
         """
+        WITH latest_approved_submission AS (
+            SELECT sub.id
+            FROM annotation_submissions sub
+            JOIN annotation_assignments aa ON aa.id = sub.assignment_id
+            JOIN final_annotations candidate ON candidate.approved_submission_id = sub.id
+            LEFT JOIN review_decisions rd
+              ON rd.submission_id = sub.id AND rd.decision = 'approved'
+            WHERE aa.paper_id = :paper_uuid AND sub.status = 'approved'
+            GROUP BY sub.id, sub.version, sub.created_at, sub.submitted_at
+            ORDER BY MAX(COALESCE(rd.created_at, candidate.approved_at)) DESC,
+                     sub.version DESC,
+                     sub.created_at DESC
+            LIMIT 1
+        )
         SELECT fa.id, fa.subject_text, fa.subject_type, fa.predicate, fa.object_text, fa.object_type,
                fa.confidence, fa.evidence_text, fa.relation_origin, fa.approved_at,
                se.sentence_key, pa.paragraph_key
         FROM final_annotations fa
+        JOIN latest_approved_submission latest ON latest.id = fa.approved_submission_id
         LEFT JOIN sentences se ON se.id = fa.sentence_id
         LEFT JOIN paragraphs pa ON pa.id = fa.support_paragraph_id
         WHERE fa.paper_id = :paper_uuid

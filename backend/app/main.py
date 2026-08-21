@@ -9,13 +9,14 @@ from sqlalchemy.orm import Session
 
 from app.data_errors import DataServiceError, data_http_exception
 from app.database import create_database, get_db
-from app.dependencies import require_approved_user
+from app.dependencies import require_approved_user, require_reviewer_or_admin
 from app.models import (
     AddRelationPayload,
     CustomPredicatePayload,
     DatasetInfo,
     PaperDetailResponse,
     PaperEditorPayload,
+    ParagraphCommentsPayload,
     PaperSummary,
     RelationRecord,
     UserProfile,
@@ -132,7 +133,36 @@ def post_save_relations(
     if payload.paper_id != paper_id:
         raise HTTPException(status_code=400, detail="paper_id mismatch")
     try:
-        saved_to = db_editor_service.save_relations(db, paper_id, payload.relations, payload.editor_mode, current_user)
+        saved_to = db_editor_service.save_relations(
+            db,
+            paper_id,
+            payload.relations,
+            payload.paragraph_comments,
+            payload.editor_mode,
+            current_user,
+            payload.base_submission_id,
+        )
+    except DataServiceError as exc:
+        raise data_http_exception(exc) from exc
+    return {"saved_to": saved_to}
+
+
+@app.post("/paper/{paper_id}/paragraph-comments/save")
+def post_save_paragraph_comments(
+    paper_id: str,
+    payload: ParagraphCommentsPayload,
+    current_user: Annotated[UserProfile, Depends(require_reviewer_or_admin)],
+    db: Annotated[Session, Depends(get_db)],
+) -> dict[str, str]:
+    if payload.paper_id != paper_id:
+        raise HTTPException(status_code=400, detail="paper_id mismatch")
+    try:
+        saved_to = db_editor_service.save_reviewer_paragraph_comments(
+            db,
+            paper_id,
+            payload.paragraph_comments,
+            current_user,
+        )
     except DataServiceError as exc:
         raise data_http_exception(exc) from exc
     return {"saved_to": saved_to}

@@ -6,6 +6,7 @@ import { useAuth } from '../../auth/AuthContext';
 import { ensureFirebaseSessionPersistence, firebaseAuth } from '../../firebase';
 import { errorMessage, type Message } from '../../lib/status';
 import { Button, Field } from '../../ui/Primitives';
+import { PasswordInput } from '../../ui/PasswordInput';
 import { AuthShell } from './AuthShell';
 
 export function SignInPage() {
@@ -44,8 +45,7 @@ export function SignInPage() {
           />
         </Field>
         <Field label="Password">
-          <input
-            type="password"
+          <PasswordInput
             autoComplete="current-password"
             value={form.password}
             onChange={(event) => setForm({ ...form, password: event.target.value })}

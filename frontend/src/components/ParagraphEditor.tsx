@@ -19,10 +19,14 @@ type Props = {
   sentences: SentenceRecord[];
   mentionsBySentence: Map<string, MentionRecord[]>;
   relations: RelationRecord[];
+  comment: string;
   onAddPredicate: (predicate: string) => Promise<void>;
   onDelete: (relationId: string) => void;
   onAdd: (relation: RelationRecord) => void;
+  onUpdate: (relation: RelationRecord) => void;
+  onCommentChange: (commentText: string) => void;
   readOnly?: boolean;
+  commentReadOnly?: boolean;
 };
 
 export default function ParagraphEditor({
@@ -33,10 +37,14 @@ export default function ParagraphEditor({
   sentences,
   mentionsBySentence,
   relations,
+  comment,
   onAddPredicate,
   onDelete,
   onAdd,
+  onUpdate,
+  onCommentChange,
   readOnly = false,
+  commentReadOnly = readOnly,
 }: Props) {
   const [selectedMentionIds, setSelectedMentionIds] = useState<string[]>([]);
   const [selectedRelation, setSelectedRelation] = useState('');
@@ -44,6 +52,7 @@ export default function ParagraphEditor({
   const [customHead, setCustomHead] = useState('');
   const [customRelation, setCustomRelation] = useState('');
   const [customTail, setCustomTail] = useState('');
+  const [editingRelation, setEditingRelation] = useState<RelationRecord | null>(null);
 
   const mentionsById = useMemo(() => {
     const pairs = paragraph.sentence_ids.flatMap((sentenceId) =>
@@ -61,6 +70,12 @@ export default function ParagraphEditor({
   useEffect(() => {
     setSelectedMentionIds((current) => current.filter((mentionId) => mentionsById.has(mentionId)).slice(0, 2));
   }, [mentionsById]);
+
+  useEffect(() => {
+    if (editingRelation && !relations.some((relation) => relation.logical_relation_id === editingRelation.logical_relation_id)) {
+      setEditingRelation(null);
+    }
+  }, [editingRelation, relations]);
 
   const toggleMention = (mentionId: string) => {
     if (readOnly) return;
@@ -113,6 +128,7 @@ export default function ParagraphEditor({
       paperTitle,
       doi,
       paragraphId: paragraph.paragraph_id,
+      paragraphText: paragraph.text,
       subjectText: customHead.trim(),
       predicate: customRelation.trim(),
       objectText: customTail.trim(),
@@ -174,16 +190,59 @@ export default function ParagraphEditor({
             {relations.length > 0 ? (
               relations.map((relation) => (
                 <RelationPill
-                  key={relation.relation_id}
+                  key={relation.logical_relation_id || relation.relation_id}
                   relation={relation}
                   supportLabelOverride={paragraph.paragraph_id}
                   onDelete={readOnly ? undefined : onDelete}
+                  onEdit={readOnly ? undefined : setEditingRelation}
                 />
               ))
             ) : (
               <EmptyState icon={MousePointer2} title="No relations attached" description={readOnly ? "No relations are present in this version." : "Select two highlighted entities or add a free-form relation below."} />
             )}
           </div>
+          {editingRelation ? (
+            <div className="relation-inline-editor">
+              <div className="relation-inline-editor__heading">
+                <strong>Edit relation</strong>
+                <span>The relation keeps the same identity, so this appears as modified in version comparison.</span>
+              </div>
+              <div className="add-relation-form add-relation-form--paragraph">
+                <Field label="Head">
+                  <input
+                    type="text"
+                    value={editingRelation.subject_text}
+                    onChange={(event) => setEditingRelation({ ...editingRelation, subject_text: event.target.value })}
+                  />
+                </Field>
+                <Field label="Relation">
+                  <input
+                    type="text"
+                    value={editingRelation.predicate}
+                    onChange={(event) => setEditingRelation({ ...editingRelation, predicate: event.target.value })}
+                  />
+                </Field>
+                <Field label="Tail">
+                  <input
+                    type="text"
+                    value={editingRelation.object_text}
+                    onChange={(event) => setEditingRelation({ ...editingRelation, object_text: event.target.value })}
+                  />
+                </Field>
+                <Button variant="secondary" onClick={() => setEditingRelation(null)}>Cancel</Button>
+                <Button
+                  variant="success"
+                  onClick={() => {
+                    onUpdate(editingRelation);
+                    setEditingRelation(null);
+                  }}
+                  disabled={!editingRelation.subject_text.trim() || !editingRelation.predicate.trim() || !editingRelation.object_text.trim()}
+                >
+                  Apply edit
+                </Button>
+              </div>
+            </div>
+          ) : null}
         </div>
 
         {!readOnly ? (
@@ -255,6 +314,18 @@ export default function ParagraphEditor({
           </>
         ) : null}
       </div>
+
+      <label className="paragraph-comment">
+        <span className="paragraph-comment__label">Comments about this paragraph's relations</span>
+        <textarea
+          value={comment}
+          onChange={(event) => onCommentChange(event.target.value)}
+          placeholder={commentReadOnly ? 'No comment was added for this paragraph.' : 'Add notes, uncertainties, or context about the relations in this paragraph...'}
+          rows={3}
+          readOnly={commentReadOnly}
+        />
+        {!commentReadOnly ? <span className="paragraph-comment__hint">Saved with the current annotation submission.</span> : null}
+      </label>
     </section>
   );
 }

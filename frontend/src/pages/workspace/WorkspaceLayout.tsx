@@ -1,15 +1,37 @@
+import { useEffect } from 'react';
 import { NavLink, Outlet, useNavigate } from 'react-router-dom';
 import { CheckCircle2, ClipboardList, Download, FileText, LogOut, Moon, SearchCheck, ShieldCheck, Sun, Users } from 'lucide-react';
 import { useAuth } from '../../auth/AuthContext';
 import { useTheme } from '../../theme/ThemeContext';
 import { Button, IconButton, StatusPill } from '../../ui/Primitives';
-import { WorkspaceDataProvider } from './WorkspaceDataContext';
+import { useWorkspaceData, WorkspaceDataProvider } from './WorkspaceDataContext';
 
-export function WorkspaceLayout() {
+function WorkspaceFrame() {
   const navigate = useNavigate();
   const { currentUser, isFirebaseVerified, mayManageAnnotators, mayManageReviewers, isAdmin, signOutUser } = useAuth();
   const { theme, toggleTheme } = useTheme();
+  const {
+    annotatorRequests,
+    reviewerRequests,
+    ensureAnnotatorRequests,
+    ensureReviewerRequests,
+  } = useWorkspaceData();
   const ThemeIcon = theme === 'light' ? Moon : Sun;
+  const pendingRequestCount = (mayManageAnnotators ? annotatorRequests.pending.data.length : 0)
+    + (mayManageReviewers ? reviewerRequests.pending.data.length : 0);
+
+  useEffect(() => {
+    const refreshPendingRequests = (force: boolean) => {
+      const tasks: Promise<unknown>[] = [];
+      if (mayManageAnnotators) tasks.push(ensureAnnotatorRequests('pending', force));
+      if (mayManageReviewers) tasks.push(ensureReviewerRequests('pending', force));
+      void Promise.all(tasks).catch(() => undefined);
+    };
+
+    refreshPendingRequests(false);
+    const intervalId = window.setInterval(() => refreshPendingRequests(true), 60000);
+    return () => window.clearInterval(intervalId);
+  }, [ensureAnnotatorRequests, ensureReviewerRequests, mayManageAnnotators, mayManageReviewers]);
 
   async function handleSignOut() {
     await signOutUser();
@@ -26,7 +48,16 @@ export function WorkspaceLayout() {
         <nav className="workspace-nav" aria-label="Workspace">
           <NavLink to="/app/editor"><FileText aria-hidden="true" size={15} /> Editor</NavLink>
           <NavLink to="/app/assignments"><ClipboardList aria-hidden="true" size={15} /> Assignments</NavLink>
-          {mayManageAnnotators || mayManageReviewers ? <NavLink to="/app/requests"><ShieldCheck aria-hidden="true" size={15} /> Requests</NavLink> : null}
+          {mayManageAnnotators || mayManageReviewers ? (
+            <NavLink to="/app/requests" aria-label={`Requests${pendingRequestCount ? `, ${pendingRequestCount} pending` : ''}`}>
+              <ShieldCheck aria-hidden="true" size={15} /> Requests
+              {pendingRequestCount > 0 ? (
+                <span className="nav-notification" role="status" aria-label={`${pendingRequestCount} pending account requests`}>
+                  {pendingRequestCount > 99 ? '99+' : pendingRequestCount}
+                </span>
+              ) : null}
+            </NavLink>
+          ) : null}
           {mayManageAnnotators || mayManageReviewers ? <NavLink to="/app/review"><SearchCheck aria-hidden="true" size={15} /> Review</NavLink> : null}
           <NavLink to="/app/exports"><Download aria-hidden="true" size={15} /> Exports</NavLink>
           {isAdmin ? <NavLink to="/app/users"><Users aria-hidden="true" size={15} /> Users</NavLink> : null}
@@ -43,9 +74,15 @@ export function WorkspaceLayout() {
           <Button variant="secondary" size="compact" icon={LogOut} onClick={handleSignOut}>Sign out</Button>
         </div>
       </header>
-      <WorkspaceDataProvider>
-        <Outlet />
-      </WorkspaceDataProvider>
+      <Outlet />
     </div>
+  );
+}
+
+export function WorkspaceLayout() {
+  return (
+    <WorkspaceDataProvider>
+      <WorkspaceFrame />
+    </WorkspaceDataProvider>
   );
 }

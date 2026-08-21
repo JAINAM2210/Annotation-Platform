@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -557,6 +558,179 @@ def test_saving_suggestion_preserves_suggested_relation_provenance(client: TestC
     assert row["action"] == "keep"
 
 
+def test_paragraph_comments_are_saved_and_loaded_with_submission(client: TestClient):
+    _, reviewer_token, reviewer, annotator_token, annotator = approved_reviewer_and_annotator(client)
+    ids = seed_editor_paper("paper_db_paragraph_comment")
+
+    assignment = client.post(
+        "/assignments",
+        headers=auth_headers(reviewer_token),
+        json={"paper_id": "paper_db_paragraph_comment", "annotator_id": annotator["id"]},
+    ).json()
+    detail = client.get("/paper/paper_db_paragraph_comment", headers=auth_headers(annotator_token)).json()
+    relation = detail["relations"][0]
+    paragraph_id = detail["paragraphs"][0]["paragraph_id"]
+
+    save = client.post(
+        "/paper/paper_db_paragraph_comment/relations/save",
+        headers=auth_headers(annotator_token),
+        json={
+            "dataset": "raw",
+            "paper_id": "paper_db_paragraph_comment",
+            "editor_mode": "paragraph",
+            "relations": [relation],
+            "paragraph_comments": [{"paragraph_id": paragraph_id, "comment_text": "  Verify the direction of this relation.  "}],
+        },
+    )
+    loaded = client.get("/paper/paper_db_paragraph_comment", headers=auth_headers(annotator_token))
+
+    assert save.status_code == 200
+    assert loaded.status_code == 200
+    assert loaded.json()["paragraph_comments"] == [{
+        "paragraph_id": paragraph_id,
+        "comment_text": "Verify the direction of this relation.",
+    }]
+
+    submission_id = client.post(
+        f"/assignments/{assignment['id']}/submit",
+        headers=auth_headers(annotator_token),
+    ).json()["submission_id"]
+    review_detail = client.get(
+        f"/review/submissions/{submission_id}",
+        headers=auth_headers(reviewer_token),
+    )
+
+    from sqlalchemy import text
+    from app.database import engine
+
+    with engine.connect() as connection:
+        stored = connection.execute(text(
+            """
+            SELECT paragraph_id, author_id, comment_text
+            FROM annotation_paragraph_comments
+            WHERE submission_id = :submission_id
+            """
+        ), {"submission_id": submission_id}).mappings().one()
+
+    assert review_detail.status_code == 200
+    assert review_detail.json()["paper"]["paragraph_comments"][0]["comment_text"] == "Verify the direction of this relation."
+    assert stored["paragraph_id"] == ids["paragraph"]
+    assert stored["author_id"] == annotator["id"]
+    assert stored["comment_text"] == "Verify the direction of this relation."
+
+    reviewer_update = client.post(
+        "/paper/paper_db_paragraph_comment/paragraph-comments/save",
+        headers=auth_headers(reviewer_token),
+        json={
+            "paper_id": "paper_db_paragraph_comment",
+            "paragraph_comments": [{"paragraph_id": paragraph_id, "comment_text": "Reviewer updated this paragraph comment."}],
+        },
+    )
+    updated_editor = client.get("/paper/paper_db_paragraph_comment", headers=auth_headers(reviewer_token))
+
+    with engine.connect() as connection:
+        annotator_snapshot = connection.execute(text(
+            """
+            SELECT author_id, comment_text
+            FROM annotation_paragraph_comments
+            WHERE submission_id = :submission_id
+            """
+        ), {"submission_id": submission_id}).mappings().one()
+        reviewer_stored = connection.execute(text(
+            """
+            SELECT sub.id AS submission_id, sub.parent_submission_id, sub.editor_role,
+                   comment.author_id, comment.comment_text
+            FROM annotation_submissions sub
+            JOIN annotation_paragraph_comments comment ON comment.submission_id = sub.id
+            WHERE sub.assignment_id = :assignment_id
+            ORDER BY sub.version DESC
+            LIMIT 1
+            """
+        ), {"assignment_id": assignment["id"]}).mappings().one()
+
+    assert reviewer_update.status_code == 200
+    assert updated_editor.status_code == 200
+    assert updated_editor.json()["paragraph_comments"] == [{
+        "paragraph_id": paragraph_id,
+        "comment_text": "Reviewer updated this paragraph comment.",
+    }]
+    assert annotator_snapshot["author_id"] == annotator["id"]
+    assert annotator_snapshot["comment_text"] == "Verify the direction of this relation."
+    assert reviewer_stored["author_id"] == reviewer["id"]
+    assert reviewer_stored["comment_text"] == "Reviewer updated this paragraph comment."
+    assert reviewer_stored["submission_id"] != submission_id
+    assert reviewer_stored["parent_submission_id"] == submission_id
+    assert reviewer_stored["editor_role"] == "reviewer"
+
+    reviewer_clear = client.post(
+        "/paper/paper_db_paragraph_comment/paragraph-comments/save",
+        headers=auth_headers(reviewer_token),
+        json={"paper_id": "paper_db_paragraph_comment", "paragraph_comments": []},
+    )
+    cleared_editor = client.get("/paper/paper_db_paragraph_comment", headers=auth_headers(reviewer_token))
+    assert reviewer_clear.status_code == 200
+    assert cleared_editor.json()["paragraph_comments"] == []
+
+    reviewer_add = client.post(
+        "/paper/paper_db_paragraph_comment/paragraph-comments/save",
+        headers=auth_headers(reviewer_token),
+        json={
+            "paper_id": "paper_db_paragraph_comment",
+            "paragraph_comments": [{"paragraph_id": paragraph_id, "comment_text": "Reviewer added a replacement comment."}],
+        },
+    )
+    assert reviewer_add.status_code == 200
+
+    annotator_forbidden = client.post(
+        "/paper/paper_db_paragraph_comment/paragraph-comments/save",
+        headers=auth_headers(annotator_token),
+        json={"paper_id": "paper_db_paragraph_comment", "paragraph_comments": []},
+    )
+    assert annotator_forbidden.status_code == 403
+
+
+def test_free_form_relation_uses_the_full_paragraph_as_evidence(client: TestClient):
+    _, reviewer_token, _, annotator_token, annotator = approved_reviewer_and_annotator(client)
+    seed_editor_paper("paper_free_form_evidence")
+    client.post(
+        "/assignments",
+        headers=auth_headers(reviewer_token),
+        json={"paper_id": "paper_free_form_evidence", "annotator_id": annotator["id"]},
+    )
+    detail = client.get("/paper/paper_free_form_evidence", headers=auth_headers(annotator_token)).json()
+    paragraph = detail["paragraphs"][0]
+    relation = {
+        **detail["relations"][0],
+        "relation_id": "custom_test_free_form",
+        "sentence_id": "",
+        "subject_text": "custom subject",
+        "subject_type": "custom",
+        "predicate": "customPredicate",
+        "object_text": "custom object",
+        "object_type": "custom",
+        "evidence_text": "",
+        "relation_origin": "",
+        "support_sentence_ids": "",
+        "support_paragraph_id": paragraph["paragraph_id"],
+    }
+
+    saved = client.post(
+        "/paper/paper_free_form_evidence/relations/save",
+        headers=auth_headers(annotator_token),
+        json={
+            "dataset": "raw",
+            "paper_id": "paper_free_form_evidence",
+            "editor_mode": "paragraph",
+            "relations": [relation],
+        },
+    )
+    reloaded = client.get("/paper/paper_free_form_evidence", headers=auth_headers(annotator_token))
+
+    assert saved.status_code == 200
+    assert reloaded.status_code == 200
+    assert reloaded.json()["relations"][0]["evidence_text"] == paragraph["text"]
+
+
 def test_db_backed_editor_missing_paper_returns_structured_404(client: TestClient):
     token = admin_token(client)
     refresh_me(client, token)
@@ -602,6 +776,37 @@ def approved_reviewer_and_annotator(client: TestClient):
     annotator = register_profile(client, annotator_token, full_name="Workflow Annotator", role="annotator")
     client.post(f"/reviewer/signup-requests/{annotator['id']}/approve", headers=auth_headers(reviewer_token))
     return admin, reviewer_token, reviewer, annotator_token, annotator
+
+
+def test_assignment_due_date_rejects_past_dates_and_accepts_today(client: TestClient):
+    _, reviewer_token, _, _, annotator = approved_reviewer_and_annotator(client)
+    seed_editor_paper("paper_assignment_due_date")
+    past_due_at = (datetime.now(timezone.utc) - timedelta(days=1)).date()
+    today_due_at = datetime.now(timezone.utc).date()
+
+    past = client.post(
+        "/assignments",
+        headers=auth_headers(reviewer_token),
+        json={
+            "paper_id": "paper_assignment_due_date",
+            "annotator_id": annotator["id"],
+            "due_at": past_due_at.isoformat(),
+        },
+    )
+    today = client.post(
+        "/assignments",
+        headers=auth_headers(reviewer_token),
+        json={
+            "paper_id": "paper_assignment_due_date",
+            "annotator_id": annotator["id"],
+            "due_at": today_due_at.isoformat(),
+        },
+    )
+
+    assert past.status_code == 400
+    assert past.json()["detail"] == "Assignment due date cannot be earlier than today"
+    assert today.status_code == 200
+    assert today.json()["due_at"] == today_due_at.isoformat()
 
 
 def test_assignment_submit_review_approve_and_export_flow(client: TestClient):
@@ -667,6 +872,88 @@ def test_assignment_submit_review_approve_and_export_flow(client: TestClient):
     assert "measures" in exported.text
 
 
+def test_export_uses_only_the_latest_approved_submission(client: TestClient):
+    from uuid import uuid4
+
+    from sqlalchemy import text
+
+    from app.database import engine
+
+    _, reviewer_token, reviewer, annotator_token, annotator = approved_reviewer_and_annotator(client)
+    ids = seed_editor_paper("paper_latest_approved_export")
+
+    def approve_version(predicate: str) -> str:
+        assignment = client.post(
+            "/assignments",
+            headers=auth_headers(reviewer_token),
+            json={"paper_id": "paper_latest_approved_export", "annotator_id": annotator["id"]},
+        ).json()
+        detail = client.get("/paper/paper_latest_approved_export", headers=auth_headers(annotator_token)).json()
+        relation = {**detail["relations"][0], "predicate": predicate}
+        saved = client.post(
+            "/paper/paper_latest_approved_export/relations/save",
+            headers=auth_headers(annotator_token),
+            json={
+                "dataset": "raw",
+                "paper_id": "paper_latest_approved_export",
+                "editor_mode": "paragraph",
+                "relations": [relation],
+            },
+        )
+        assert saved.status_code == 200
+        submission_id = client.post(
+            f"/assignments/{assignment['id']}/submit",
+            headers=auth_headers(annotator_token),
+        ).json()["submission_id"]
+        approved = client.post(
+            f"/review/submissions/{submission_id}/approve",
+            headers=auth_headers(reviewer_token),
+            json={"comment": f"Approved {predicate}"},
+        )
+        assert approved.status_code == 200
+        return submission_id
+
+    first_submission_id = approve_version("firstApprovedPredicate")
+    second_submission_id = approve_version("latestApprovedPredicate")
+    assert first_submission_id != second_submission_id
+
+    with engine.begin() as connection:
+        first_relation_id = connection.execute(text(
+            "SELECT id FROM annotation_submission_relations WHERE submission_id = :submission_id LIMIT 1"
+        ), {"submission_id": first_submission_id}).scalar_one()
+        connection.execute(text(
+            """
+            INSERT INTO final_annotations (
+                id, paper_id, approved_submission_id, source_submission_relation_id, approved_by_id,
+                sentence_id, support_paragraph_id, subject_text, subject_type, predicate,
+                object_text, object_type, confidence, evidence_text, relation_origin, approved_at
+            ) VALUES (
+                :id, :paper_id, :submission_id, :source_relation_id, :approved_by_id,
+                :sentence_id, :paragraph_id, 'old subject', 'custom', 'staleApprovedPredicate',
+                'old object', 'custom', 1.0, 'old evidence', 'test', :approved_at
+            )
+            """
+        ), {
+            "id": str(uuid4()),
+            "paper_id": ids["paper"],
+            "submission_id": first_submission_id,
+            "source_relation_id": first_relation_id,
+            "approved_by_id": reviewer["id"],
+            "sentence_id": ids["sentence"],
+            "paragraph_id": ids["paragraph"],
+            "approved_at": "2999-01-01 00:00:00",
+        })
+
+    exported = client.get(
+        "/exports/papers/paper_latest_approved_export?format=json",
+        headers=auth_headers(reviewer_token),
+    )
+
+    assert exported.status_code == 200
+    records = exported.json()
+    assert [record["predicate"] for record in records] == ["latestApprovedPredicate"]
+
+
 def test_reviewer_can_return_and_annotator_can_resubmit(client: TestClient):
     _, reviewer_token, _, annotator_token, annotator = approved_reviewer_and_annotator(client)
     seed_editor_paper("paper_workflow_return")
@@ -702,9 +989,165 @@ def test_reviewer_can_return_and_annotator_can_resubmit(client: TestClient):
     resave = client.post(
         "/paper/paper_workflow_return/relations/save",
         headers=auth_headers(annotator_token),
-        json={"dataset": "raw", "paper_id": "paper_workflow_return", "editor_mode": "paragraph", "relations": [relation]},
+        json={
+            "dataset": "raw",
+            "paper_id": "paper_workflow_return",
+            "editor_mode": "paragraph",
+            "base_submission_id": submission_id,
+            "relations": [relation],
+        },
     )
     assert resave.status_code == 200
     resubmit = client.post(f"/assignments/{assignment['id']}/submit", headers=auth_headers(annotator_token))
     assert resubmit.status_code == 200
     assert resubmit.json()["assignment"]["status"] == "submitted"
+
+
+def test_reviewer_edits_create_immutable_revision_and_bidirectional_diff(client: TestClient):
+    from sqlalchemy import text
+
+    from app.database import engine
+
+    _, reviewer_token, reviewer, annotator_token, annotator = approved_reviewer_and_annotator(client)
+    seed_editor_paper("paper_revision_handoff")
+    assignment = client.post(
+        "/assignments",
+        headers=auth_headers(reviewer_token),
+        json={"paper_id": "paper_revision_handoff", "annotator_id": annotator["id"]},
+    ).json()
+
+    annotator_detail = client.get("/paper/paper_revision_handoff", headers=auth_headers(annotator_token)).json()
+    initial_relation = annotator_detail["relations"][0]
+    client.post(
+        "/paper/paper_revision_handoff/relations/save",
+        headers=auth_headers(annotator_token),
+        json={
+            "dataset": "raw",
+            "paper_id": "paper_revision_handoff",
+            "editor_mode": "paragraph",
+            "relations": [initial_relation],
+        },
+    )
+    annotator_submission_id = client.post(
+        f"/assignments/{assignment['id']}/submit",
+        headers=auth_headers(annotator_token),
+    ).json()["submission_id"]
+
+    reviewer_detail = client.get("/paper/paper_revision_handoff", headers=auth_headers(reviewer_token)).json()
+    reviewer_relation = {**reviewer_detail["relations"][0], "predicate": "reviewerUpdatedPredicate"}
+    reviewer_save = client.post(
+        "/paper/paper_revision_handoff/relations/save",
+        headers=auth_headers(reviewer_token),
+        json={
+            "dataset": "raw",
+            "paper_id": "paper_revision_handoff",
+            "editor_mode": "paragraph",
+            "base_submission_id": annotator_submission_id,
+            "relations": [reviewer_relation],
+            "paragraph_comments": [{
+                "paragraph_id": reviewer_detail["paragraphs"][0]["paragraph_id"],
+                "comment_text": "Reviewer changed the predicate.",
+            }],
+        },
+    )
+    assert reviewer_save.status_code == 200
+
+    reviewer_draft = client.get("/paper/paper_revision_handoff", headers=auth_headers(reviewer_token)).json()
+    reviewer_submission_id = reviewer_draft["revision"]["submission_id"]
+    assert reviewer_draft["assignment"]["status"] == "review_in_progress"
+    assert reviewer_draft["revision"]["status"] == "review_draft"
+    assert reviewer_draft["revision"]["parent_submission_id"] == annotator_submission_id
+    assert reviewer_draft["revision"]["created_by_id"] == reviewer["id"]
+    assert reviewer_draft["changes"]["modified"][0]["before"]["predicate"] == initial_relation["predicate"]
+    assert reviewer_draft["changes"]["modified"][0]["after"]["predicate"] == "reviewerUpdatedPredicate"
+    assert reviewer_draft["changes"]["paragraph_comments"][0]["after_text"] == "Reviewer changed the predicate."
+
+    with engine.connect() as connection:
+        original_predicate = connection.execute(text(
+            "SELECT predicate FROM annotation_submission_relations WHERE submission_id = :submission_id"
+        ), {"submission_id": annotator_submission_id}).scalar_one()
+    assert original_predicate == initial_relation["predicate"]
+
+    returned = client.post(
+        f"/review/submissions/{reviewer_submission_id}/return",
+        headers=auth_headers(reviewer_token),
+        json={"comment": "Please review my predicate update."},
+    )
+    assert returned.status_code == 200
+    annotator_returned = client.get("/paper/paper_revision_handoff", headers=auth_headers(annotator_token)).json()
+    assert annotator_returned["revision"]["status"] == "returned"
+    assert annotator_returned["changes"]["modified"][0]["after"]["predicate"] == "reviewerUpdatedPredicate"
+    assert "Please review my predicate update." in annotator_returned["assignment"]["latest_review_comment"]
+
+    annotator_revision = {**annotator_returned["relations"][0], "object_text": "annotator revised object"}
+    annotator_resave = client.post(
+        "/paper/paper_revision_handoff/relations/save",
+        headers=auth_headers(annotator_token),
+        json={
+            "dataset": "raw",
+            "paper_id": "paper_revision_handoff",
+            "editor_mode": "paragraph",
+            "base_submission_id": reviewer_submission_id,
+            "relations": [annotator_revision],
+            "paragraph_comments": annotator_returned["paragraph_comments"],
+        },
+    )
+    assert annotator_resave.status_code == 200
+    resubmitted = client.post(
+        f"/assignments/{assignment['id']}/submit",
+        headers=auth_headers(annotator_token),
+    )
+    assert resubmitted.status_code == 200
+
+    reviewer_resubmission = client.get("/paper/paper_revision_handoff", headers=auth_headers(reviewer_token)).json()
+    assert reviewer_resubmission["revision"]["parent_submission_id"] == reviewer_submission_id
+    assert reviewer_resubmission["changes"]["modified"][0]["before"]["object_text"] != "annotator revised object"
+    assert reviewer_resubmission["changes"]["modified"][0]["after"]["object_text"] == "annotator revised object"
+
+    stale_save = client.post(
+        "/paper/paper_revision_handoff/relations/save",
+        headers=auth_headers(reviewer_token),
+        json={
+            "dataset": "raw",
+            "paper_id": "paper_revision_handoff",
+            "editor_mode": "paragraph",
+            "base_submission_id": annotator_submission_id,
+            "relations": reviewer_resubmission["relations"],
+        },
+    )
+    assert stale_save.status_code == 409
+
+    resubmitted_submission_id = reviewer_resubmission["revision"]["submission_id"]
+    final_reviewer_relation = {
+        **reviewer_resubmission["relations"][0],
+        "predicate": "finalReviewerApprovedPredicate",
+    }
+    final_reviewer_save = client.post(
+        "/paper/paper_revision_handoff/relations/save",
+        headers=auth_headers(reviewer_token),
+        json={
+            "dataset": "raw",
+            "paper_id": "paper_revision_handoff",
+            "editor_mode": "paragraph",
+            "base_submission_id": resubmitted_submission_id,
+            "relations": [final_reviewer_relation],
+            "paragraph_comments": reviewer_resubmission["paragraph_comments"],
+        },
+    )
+    assert final_reviewer_save.status_code == 200
+    final_reviewer_draft = client.get("/paper/paper_revision_handoff", headers=auth_headers(reviewer_token)).json()
+    final_reviewer_submission_id = final_reviewer_draft["revision"]["submission_id"]
+    approved = client.post(
+        f"/review/submissions/{final_reviewer_submission_id}/approve",
+        headers=auth_headers(reviewer_token),
+        json={"comment": "Approved after final reviewer edit."},
+    )
+    assert approved.status_code == 200
+    assert approved.json()["status"] == "approved"
+
+    exported = client.get(
+        "/exports/papers/paper_revision_handoff?format=json",
+        headers=auth_headers(reviewer_token),
+    )
+    assert exported.status_code == 200
+    assert exported.json()[0]["predicate"] == "finalReviewerApprovedPredicate"

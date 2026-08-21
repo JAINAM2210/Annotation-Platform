@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import enum
-from datetime import datetime
+from datetime import date, datetime
 from typing import Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
-from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, Integer, JSON, Numeric, String, Text, Uuid, func
+from sqlalchemy import Boolean, Date, DateTime, Enum, ForeignKey, Integer, JSON, Numeric, String, Text, UniqueConstraint, Uuid, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -183,7 +183,7 @@ class AnnotationAssignmentModel(Base):
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    due_at: Mapped[date | None] = mapped_column(Date, nullable=True)
 
 
 class AnnotationSubmissionModel(Base):
@@ -193,15 +193,33 @@ class AnnotationSubmissionModel(Base):
     assignment_id: Mapped[str | None] = mapped_column(ForeignKey("annotation_assignments.id", ondelete="CASCADE"), nullable=True)
     version: Mapped[int | None] = mapped_column(Integer, nullable=True)
     status: Mapped[str | None] = mapped_column(Text, nullable=True)
+    parent_submission_id: Mapped[str | None] = mapped_column(ForeignKey("annotation_submissions.id", ondelete="SET NULL"), nullable=True)
+    created_by_id: Mapped[str | None] = mapped_column(ForeignKey("user_profiles.id", ondelete="SET NULL"), nullable=True)
+    editor_role: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=True)
     submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class AnnotationParagraphCommentModel(Base):
+    __tablename__ = "annotation_paragraph_comments"
+    __table_args__ = (UniqueConstraint("submission_id", "paragraph_id", name="uq_annotation_paragraph_comment"),)
+
+    id: Mapped[str] = mapped_column(Uuid(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
+    submission_id: Mapped[str] = mapped_column(ForeignKey("annotation_submissions.id", ondelete="CASCADE"), nullable=False)
+    paragraph_id: Mapped[str] = mapped_column(ForeignKey("paragraphs.id", ondelete="CASCADE"), nullable=False)
+    author_id: Mapped[str | None] = mapped_column(ForeignKey("user_profiles.id", ondelete="SET NULL"), nullable=True)
+    comment_text: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
+
+
 class AnnotationSubmissionRelationModel(Base):
     __tablename__ = "annotation_submission_relations"
+    __table_args__ = (UniqueConstraint("submission_id", "logical_relation_id", name="uq_submission_logical_relation"),)
 
     id: Mapped[str] = mapped_column(Uuid(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
     submission_id: Mapped[str | None] = mapped_column(ForeignKey("annotation_submissions.id", ondelete="CASCADE"), nullable=True)
+    logical_relation_id: Mapped[str] = mapped_column(Uuid(as_uuid=False), nullable=False, default=lambda: str(uuid4()))
     suggested_relation_id: Mapped[str | None] = mapped_column(ForeignKey("suggested_relations.id"), nullable=True)
     action: Mapped[str | None] = mapped_column(Text, nullable=True)
     sentence_id: Mapped[str | None] = mapped_column(ForeignKey("sentences.id"), nullable=True)
@@ -337,6 +355,11 @@ class ParagraphRecord(BaseModel):
     sentence_ids: list[str]
 
 
+class ParagraphCommentRecord(BaseModel):
+    paragraph_id: str = Field(min_length=1)
+    comment_text: str = ""
+
+
 class MentionRecord(BaseModel):
     mention_id: str
     sentence_id: str
@@ -350,6 +373,7 @@ class MentionRecord(BaseModel):
 
 class RelationRecord(BaseModel):
     relation_id: str
+    logical_relation_id: str = ""
     sentence_id: str = ""
     paper_id: str
     paper_title: str
@@ -368,21 +392,56 @@ class RelationRecord(BaseModel):
     support_paragraph_id: str = ""
 
 
+class RevisionInfo(BaseModel):
+    submission_id: str
+    version: int
+    status: str
+    parent_submission_id: str | None = None
+    parent_version: int | None = None
+    created_by_id: str | None = None
+    editor_role: str = ""
+    created_at: datetime | None = None
+
+
+class ModifiedRelationRecord(BaseModel):
+    before: RelationRecord
+    after: RelationRecord
+
+
+class ParagraphCommentChange(BaseModel):
+    paragraph_id: str
+    before_text: str = ""
+    after_text: str = ""
+
+
+class RevisionChanges(BaseModel):
+    parent_submission_id: str
+    parent_version: int
+    added: list[RelationRecord] = Field(default_factory=list)
+    removed: list[RelationRecord] = Field(default_factory=list)
+    modified: list[ModifiedRelationRecord] = Field(default_factory=list)
+    unchanged_count: int = 0
+    paragraph_comments: list[ParagraphCommentChange] = Field(default_factory=list)
+
+
 class PaperDetailResponse(BaseModel):
     paper: PaperSummary
     sentences: list[SentenceRecord]
     paragraphs: list[ParagraphRecord]
     mentions: list[MentionRecord]
     relations: list[RelationRecord]
+    paragraph_comments: list[ParagraphCommentRecord] = Field(default_factory=list)
     source: str
     warnings: list[str] = Field(default_factory=list)
     assignment: PaperAssignmentState | None = None
+    revision: RevisionInfo | None = None
+    changes: RevisionChanges | None = None
 
 
 class AssignmentCreateRequest(BaseModel):
     paper_id: str = Field(min_length=1, max_length=255)
     annotator_id: str = Field(min_length=1)
-    due_at: datetime | None = None
+    due_at: date | None = None
 
     @field_validator("paper_id", "annotator_id")
     @classmethod
@@ -406,7 +465,7 @@ class AssignmentRead(BaseModel):
     started_at: datetime | None = None
     submitted_at: datetime | None = None
     completed_at: datetime | None = None
-    due_at: datetime | None = None
+    due_at: date | None = None
     latest_submission_id: str | None = None
     latest_submission_status: str | None = None
     latest_submission_version: int | None = None
@@ -450,6 +509,13 @@ class PaperEditorPayload(BaseModel):
     paper_id: str
     editor_mode: EditorMode = "paragraph"
     relations: list[RelationRecord]
+    paragraph_comments: list[ParagraphCommentRecord] = Field(default_factory=list)
+    base_submission_id: str | None = None
+
+
+class ParagraphCommentsPayload(BaseModel):
+    paper_id: str
+    paragraph_comments: list[ParagraphCommentRecord] = Field(default_factory=list)
 
 
 class AddRelationPayload(BaseModel):

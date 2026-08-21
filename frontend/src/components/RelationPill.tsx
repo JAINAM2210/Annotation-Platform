@@ -1,14 +1,15 @@
-import { ArrowRight, X } from 'lucide-react';
+import { ArrowRight, Pencil, X } from 'lucide-react';
 import type { RelationRecord } from '../types';
 import { IconButton } from '../ui/Primitives';
 
 type Props = {
   relation: RelationRecord;
   onDelete?: (relationId: string) => void;
+  onEdit?: (relation: RelationRecord) => void;
   supportLabelOverride?: string;
 };
 
-export default function RelationPill({ relation, onDelete, supportLabelOverride }: Props) {
+export default function RelationPill({ relation, onDelete, onEdit, supportLabelOverride }: Props) {
   const supportLabel = supportLabelOverride || relation.support_paragraph_id || relation.support_sentence_ids;
 
   return (
@@ -21,12 +22,20 @@ export default function RelationPill({ relation, onDelete, supportLabelOverride 
         <span className="relation-pill__entity">{relation.object_text}</span>
       </span>
       {supportLabel ? <span className="relation-pill__support">{supportLabel}</span> : null}
+      {onEdit ? (
+        <IconButton
+          className="relation-pill__edit"
+          icon={Pencil}
+          label={`Edit ${relation.subject_text} ${relation.predicate} ${relation.object_text}`}
+          onClick={() => onEdit(relation)}
+        />
+      ) : null}
       {onDelete ? (
         <IconButton
           className="relation-pill__delete"
           icon={X}
           label={`Delete ${relation.subject_text} ${relation.predicate} ${relation.object_text}`}
-          onClick={() => onDelete(relation.relation_id)}
+          onClick={() => onDelete(relation.logical_relation_id || relation.relation_id)}
         />
       ) : null}
     </span>
