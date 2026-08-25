@@ -1151,6 +1151,7 @@ def save_relations(
             evidence_text = relation.evidence_text
             if relation.relation_id.startswith("custom_") and paragraph_id:
                 evidence_text = maps["paragraph_text"].get(relation.support_paragraph_id, evidence_text)
+            relation_origin = "manual_edit" if relation.relation_id.startswith("custom_") else relation.relation_origin
             action = "add" if suggested_relation_id is None or relation.relation_id.startswith(("manual_", "custom_")) else "keep"
             _execute(db, insert_relation_sql, {
                 "id": relation_row_id,
@@ -1170,11 +1171,12 @@ def save_relations(
                 "confidence": relation.confidence,
                 "accepted": relation.accepted,
                 "evidence_text": evidence_text,
-                "relation_origin": relation.relation_origin,
+                "relation_origin": relation_origin,
                 "inherited_from": relation.inherited_from,
                 "raw_payload": json.dumps(relation.model_copy(update={
                     "evidence_text": evidence_text,
                     "logical_relation_id": logical_relation_id,
+                    "relation_origin": relation_origin,
                 }).model_dump()),
             })
 

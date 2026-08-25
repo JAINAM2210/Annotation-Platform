@@ -729,6 +729,7 @@ def test_free_form_relation_uses_the_full_paragraph_as_evidence(client: TestClie
     assert saved.status_code == 200
     assert reloaded.status_code == 200
     assert reloaded.json()["relations"][0]["evidence_text"] == paragraph["text"]
+    assert reloaded.json()["relations"][0]["relation_origin"] == "manual_edit"
 
 
 def test_db_backed_editor_missing_paper_returns_structured_404(client: TestClient):
@@ -776,6 +777,49 @@ def approved_reviewer_and_annotator(client: TestClient):
     annotator = register_profile(client, annotator_token, full_name="Workflow Annotator", role="annotator")
     client.post(f"/reviewer/signup-requests/{annotator['id']}/approve", headers=auth_headers(reviewer_token))
     return admin, reviewer_token, reviewer, annotator_token, annotator
+
+
+def test_reviewer_can_browse_all_papers_but_edit_only_owned_assignments(client: TestClient):
+    _, reviewer_token, _, annotator_token, annotator = approved_reviewer_and_annotator(client)
+    seed_editor_paper("paper_reviewer_assigned")
+    seed_editor_paper("paper_reviewer_browse_only", with_relation_predicate=False)
+    assignment = client.post(
+        "/assignments",
+        headers=auth_headers(reviewer_token),
+        json={"paper_id": "paper_reviewer_assigned", "annotator_id": annotator["id"]},
+    )
+    assert assignment.status_code == 200
+
+    reviewer_papers = client.get("/papers", headers=auth_headers(reviewer_token))
+    browse_only_detail = client.get("/paper/paper_reviewer_browse_only", headers=auth_headers(reviewer_token))
+    assert reviewer_papers.status_code == 200
+    assert {paper["paper_id"] for paper in reviewer_papers.json()} == {
+        "paper_reviewer_assigned",
+        "paper_reviewer_browse_only",
+    }
+    assert browse_only_detail.status_code == 200
+    assert browse_only_detail.json()["assignment"] is None
+
+    browse_only_save = client.post(
+        "/paper/paper_reviewer_browse_only/relations/save",
+        headers=auth_headers(reviewer_token),
+        json={
+            "dataset": "raw",
+            "paper_id": "paper_reviewer_browse_only",
+            "editor_mode": "paragraph",
+            "relations": browse_only_detail.json()["relations"],
+        },
+    )
+    assert browse_only_save.status_code == 403
+
+    annotator_papers = client.get("/papers", headers=auth_headers(annotator_token))
+    annotator_unassigned_detail = client.get(
+        "/paper/paper_reviewer_browse_only",
+        headers=auth_headers(annotator_token),
+    )
+    assert annotator_papers.status_code == 200
+    assert [paper["paper_id"] for paper in annotator_papers.json()] == ["paper_reviewer_assigned"]
+    assert annotator_unassigned_detail.status_code == 403
 
 
 def test_assignment_due_date_rejects_past_dates_and_accepts_today(client: TestClient):
@@ -870,6 +914,8 @@ def test_assignment_submit_review_approve_and_export_flow(client: TestClient):
     assert exported.status_code == 200
     assert "Plasma source" in exported.text
     assert "measures" in exported.text
+    assert "sentence_id" not in exported.text.splitlines()[0].split(",")
+    assert "confidence" not in exported.text.splitlines()[0].split(",")
 
 
 def test_export_uses_only_the_latest_approved_submission(client: TestClient):
@@ -952,6 +998,8 @@ def test_export_uses_only_the_latest_approved_submission(client: TestClient):
     assert exported.status_code == 200
     records = exported.json()
     assert [record["predicate"] for record in records] == ["latestApprovedPredicate"]
+    assert "sentence_id" not in records[0]
+    assert "confidence" not in records[0]
 
 
 def test_reviewer_can_return_and_annotator_can_resubmit(client: TestClient):

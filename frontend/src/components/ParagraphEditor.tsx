@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Eraser, MousePointer2, Plus } from 'lucide-react';
-import type { MentionRecord, ParagraphRecord, RelationRecord, SentenceRecord } from '../types';
+import { Eraser, MessageSquareText, MousePointer2, Plus } from 'lucide-react';
+import type { MentionRecord, ModifiedRelationRecord, ParagraphCommentChange, ParagraphRecord, RelationRecord, SentenceRecord } from '../types';
 import RelationPill from './RelationPill';
 import {
   buildCustomParagraphRelation,
@@ -11,6 +11,18 @@ import {
 } from './editorUtils';
 import { Button, EmptyState, Field } from '../ui/Primitives';
 
+export type ParagraphRevisionChanges = {
+  parentVersion: number;
+  addedRelationIds: Set<string>;
+  removedRelations: RelationRecord[];
+  modifiedRelations: ModifiedRelationRecord[];
+  commentChange?: ParagraphCommentChange;
+};
+
+function relationIdentity(relation: RelationRecord) {
+  return relation.logical_relation_id || relation.relation_id;
+}
+
 type Props = {
   paperId: string;
   paperTitle: string;
@@ -19,6 +31,7 @@ type Props = {
   sentences: SentenceRecord[];
   mentionsBySentence: Map<string, MentionRecord[]>;
   relations: RelationRecord[];
+  revisionChanges?: ParagraphRevisionChanges;
   comment: string;
   onAddPredicate: (predicate: string) => Promise<void>;
   onDelete: (relationId: string) => void;
@@ -37,6 +50,7 @@ export default function ParagraphEditor({
   sentences,
   mentionsBySentence,
   relations,
+  revisionChanges,
   comment,
   onAddPredicate,
   onDelete,
@@ -53,6 +67,28 @@ export default function ParagraphEditor({
   const [customRelation, setCustomRelation] = useState('');
   const [customTail, setCustomTail] = useState('');
   const [editingRelation, setEditingRelation] = useState<RelationRecord | null>(null);
+
+  const modifiedRelationIds = useMemo(
+    () => new Set(revisionChanges?.modifiedRelations.map((change) => relationIdentity(change.after)) ?? []),
+    [revisionChanges?.modifiedRelations]
+  );
+  const changedRelations = relations.filter((relation) => (
+    revisionChanges?.addedRelationIds.has(relationIdentity(relation))
+    || modifiedRelationIds.has(relationIdentity(relation))
+  ));
+  const unchangedRelations = relations.filter((relation) => (
+    !revisionChanges?.addedRelationIds.has(relationIdentity(relation))
+    && !modifiedRelationIds.has(relationIdentity(relation))
+  ));
+  const orderedRelations = [...changedRelations, ...unchangedRelations];
+  const removedRelations = revisionChanges?.removedRelations ?? [];
+  const commentChangeLabel = revisionChanges?.commentChange
+    ? revisionChanges.commentChange.before_text && revisionChanges.commentChange.after_text
+      ? 'Comment modified'
+      : revisionChanges.commentChange.after_text
+        ? 'Comment added'
+        : 'Comment deleted'
+    : '';
 
   const mentionsById = useMemo(() => {
     const pairs = paragraph.sentence_ids.flatMap((sentenceId) =>
@@ -145,9 +181,6 @@ export default function ParagraphEditor({
           <span className="paragraph-kicker">Paragraph</span>
           <h3>{paragraph.paragraph_index}</h3>
         </div>
-        <p className="muted">
-          {paragraph.sentence_ids.length} sentence{paragraph.sentence_ids.length === 1 ? '' : 's'}
-        </p>
       </div>
 
       <div className="paragraph-text">
@@ -184,23 +217,70 @@ export default function ParagraphEditor({
         <div className="relation-panel">
           <div className="relation-panel__header">
             <strong>Relations</strong>
-            <span>{relations.length}</span>
+            <div className="relation-panel__summary">
+              <span>{relations.length} current</span>
+              {revisionChanges ? (
+                <div className="relation-change-counts" aria-label={`Changes since version ${revisionChanges.parentVersion}`}>
+                  <span className="relation-change-count relation-change-count--added">+{revisionChanges.addedRelationIds.size} new</span>
+                  <span className="relation-change-count relation-change-count--modified">~{revisionChanges.modifiedRelations.length} modified</span>
+                  <span className="relation-change-count relation-change-count--removed">−{removedRelations.length} deleted</span>
+                </div>
+              ) : null}
+            </div>
           </div>
           <div className="pill-row">
-            {relations.length > 0 ? (
-              relations.map((relation) => (
-                <RelationPill
-                  key={relation.logical_relation_id || relation.relation_id}
-                  relation={relation}
-                  supportLabelOverride={paragraph.paragraph_id}
-                  onDelete={readOnly ? undefined : onDelete}
-                  onEdit={readOnly ? undefined : setEditingRelation}
-                />
-              ))
+            {orderedRelations.length > 0 || removedRelations.length > 0 ? (
+              <>
+                {changedRelations.map((relation) => (
+                  <RelationPill
+                    key={relation.logical_relation_id || relation.relation_id}
+                    relation={relation}
+                    changeType={revisionChanges?.addedRelationIds.has(relationIdentity(relation)) ? 'added' : 'modified'}
+                    onDelete={readOnly ? undefined : onDelete}
+                    onEdit={readOnly ? undefined : setEditingRelation}
+                  />
+                ))}
+                {removedRelations.map((relation) => (
+                  <RelationPill
+                    key={`removed-${relation.logical_relation_id || relation.relation_id}`}
+                    relation={relation}
+                    changeType="removed"
+                  />
+                ))}
+                {unchangedRelations.map((relation) => (
+                  <RelationPill
+                    key={relation.logical_relation_id || relation.relation_id}
+                    relation={relation}
+                    changeType={revisionChanges ? 'unchanged' : undefined}
+                    onDelete={readOnly ? undefined : onDelete}
+                    onEdit={readOnly ? undefined : setEditingRelation}
+                  />
+                ))}
+              </>
             ) : (
               <EmptyState icon={MousePointer2} title="No relations attached" description={readOnly ? "No relations are present in this version." : "Select two highlighted entities or add a free-form relation below."} />
             )}
           </div>
+          {revisionChanges && revisionChanges.modifiedRelations.length > 0 ? (
+            <div className="relation-modification-list">
+              <div className="relation-modification-list__heading">
+                <strong>Modified relation details</strong>
+                <span>Compared with version {revisionChanges.parentVersion}</span>
+              </div>
+              {revisionChanges.modifiedRelations.map((change) => (
+                <div className="relation-modification" key={`modified-${relationIdentity(change.after)}`}>
+                  <div>
+                    <span className="relation-modification__label">Before</span>
+                    <p>{change.before.subject_text} — <strong>{change.before.predicate}</strong> — {change.before.object_text}</p>
+                  </div>
+                  <div>
+                    <span className="relation-modification__label">After</span>
+                    <p>{change.after.subject_text} — <strong>{change.after.predicate}</strong> — {change.after.object_text}</p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : null}
           {editingRelation ? (
             <div className="relation-inline-editor">
               <div className="relation-inline-editor__heading">
@@ -315,17 +395,34 @@ export default function ParagraphEditor({
         ) : null}
       </div>
 
-      <label className="paragraph-comment">
-        <span className="paragraph-comment__label">Comments about this paragraph's relations</span>
+      <section className={`paragraph-comment${commentReadOnly ? ' paragraph-comment--read-only' : ''}`}>
+        <div className="paragraph-comment__header">
+          <label className="paragraph-comment__label" htmlFor={`paragraph-comment-${paragraph.paragraph_id}`}>
+            <span className="paragraph-comment__icon"><MessageSquareText aria-hidden="true" size={17} /></span>
+            <span>
+              <strong>Paragraph relation notes</strong>
+              <small>Comments and context for this paragraph's relations</small>
+            </span>
+          </label>
+          {commentChangeLabel ? <span className="paragraph-comment__change">{commentChangeLabel}</span> : null}
+        </div>
         <textarea
+          id={`paragraph-comment-${paragraph.paragraph_id}`}
           value={comment}
           onChange={(event) => onCommentChange(event.target.value)}
           placeholder={commentReadOnly ? 'No comment was added for this paragraph.' : 'Add notes, uncertainties, or context about the relations in this paragraph...'}
           rows={3}
           readOnly={commentReadOnly}
         />
+        {revisionChanges?.commentChange ? (
+          <details className="paragraph-comment__history">
+            <summary>Compare with version {revisionChanges.parentVersion}</summary>
+            <div><span>Before</span><p>{revisionChanges.commentChange.before_text || '(No comment)'}</p></div>
+            <div><span>After</span><p>{revisionChanges.commentChange.after_text || '(No comment)'}</p></div>
+          </details>
+        ) : null}
         {!commentReadOnly ? <span className="paragraph-comment__hint">Saved with the current annotation submission.</span> : null}
-      </label>
+      </section>
     </section>
   );
 }

@@ -438,20 +438,19 @@ def assignment_for_paper_and_user(db: Session, paper_uuid: str, current_user: Us
 
 
 def visible_paper_uuids(db: Session, current_user: UserProfile) -> set[str] | None:
-    if current_user.role == UserRole.admin:
+    if current_user.role in {UserRole.reviewer, UserRole.admin}:
         return None
-    column = "reviewer_id" if current_user.role == UserRole.reviewer else "annotator_id"
-    statement = text(f"""
+    statement = text("""
         SELECT DISTINCT paper_id
         FROM annotation_assignments
-        WHERE {column} = :user_id AND status <> 'cancelled'
+        WHERE annotator_id = :user_id AND status <> 'cancelled'
     """)
     rows = _execute(db, statement, {"user_id": current_user.id}).all()
     return {_row_value(row[0]) for row in rows}
 
 
 def ensure_paper_visible(db: Session, paper_uuid: str, current_user: UserProfile) -> AssignmentRead | None:
-    if current_user.role == UserRole.admin:
+    if current_user.role in {UserRole.reviewer, UserRole.admin}:
         return assignment_for_paper_and_user(db, paper_uuid, current_user)
     assignment = assignment_for_paper_and_user(db, paper_uuid, current_user)
     if assignment is None:
@@ -751,11 +750,9 @@ def export_final_annotations(db: Session, paper_id: str, export_format: str, cur
             LIMIT 1
         )
         SELECT fa.id, fa.subject_text, fa.subject_type, fa.predicate, fa.object_text, fa.object_type,
-               fa.confidence, fa.evidence_text, fa.relation_origin, fa.approved_at,
-               se.sentence_key, pa.paragraph_key
+               fa.evidence_text, fa.relation_origin, fa.approved_at, pa.paragraph_key
         FROM final_annotations fa
         JOIN latest_approved_submission latest ON latest.id = fa.approved_submission_id
-        LEFT JOIN sentences se ON se.id = fa.sentence_id
         LEFT JOIN paragraphs pa ON pa.id = fa.support_paragraph_id
         WHERE fa.paper_id = :paper_uuid
         ORDER BY fa.approved_at, fa.id
@@ -771,7 +768,6 @@ def export_final_annotations(db: Session, paper_id: str, export_format: str, cur
             "paper_id": _row_value(paper["paper_id"]),
             "title": _row_value(paper["title"]),
             "doi": _row_value(paper["doi"]),
-            "sentence_id": _row_value(row["sentence_key"]),
             "support_paragraph_id": _row_value(row["paragraph_key"]),
             "support_sentence_ids": ";".join(support_map.get(_row_value(row["id"]), [])),
             "subject_text": _row_value(row["subject_text"]),
@@ -779,7 +775,6 @@ def export_final_annotations(db: Session, paper_id: str, export_format: str, cur
             "predicate": _row_value(row["predicate"]),
             "object_text": _row_value(row["object_text"]),
             "object_type": _row_value(row["object_type"]),
-            "confidence": _float_value(row["confidence"]),
             "evidence_text": _row_value(row["evidence_text"]),
             "relation_origin": _row_value(row["relation_origin"]),
             "approved_at": _row_value(row["approved_at"]),

@@ -9,7 +9,7 @@ import {
   submitAssignment,
 } from '../../api/client';
 import { useAuth } from '../../auth/AuthContext';
-import ParagraphEditor from '../../components/ParagraphEditor';
+import ParagraphEditor, { type ParagraphRevisionChanges } from '../../components/ParagraphEditor';
 import { errorMessage, type Message } from '../../lib/status';
 import { Button, EmptyState, MessageBanner, ProgressBar, SelectControl, StatusPill } from '../../ui/Primitives';
 import type {
@@ -19,8 +19,6 @@ import type {
   ParagraphCommentRecord,
   ParagraphRecord,
   RelationRecord,
-  RevisionChanges,
-  RevisionInfo,
   SentenceRecord,
 } from '../../types';
 import { useWorkspaceData, type EditorDraftState } from './WorkspaceDataContext';
@@ -71,8 +69,8 @@ function emptyEditorCopy(role?: string) {
   }
   if (role === 'reviewer') {
     return {
-      title: 'No papers under your review yet',
-      description: 'Create an assignment from the Assignments tab to begin reviewer-led annotation work.',
+      title: 'No papers are available yet',
+      description: 'Papers will appear here after they are imported into the platform database.',
     };
   }
   return {
@@ -94,56 +92,6 @@ function draftFromDetail(detail: PaperDetailResponse | null | undefined): Editor
   };
 }
 
-function relationText(relation: RelationRecord) {
-  return `${relation.subject_text} — ${relation.predicate} — ${relation.object_text}`;
-}
-
-function RevisionComparison({ revision, changes }: { revision: RevisionInfo; changes: RevisionChanges }) {
-  const changedCount = changes.added.length + changes.removed.length + changes.modified.length;
-  return (
-    <details className="revision-comparison" open={changedCount > 0 || changes.paragraph_comments.length > 0}>
-      <summary>
-        <span>
-          <strong>Changes since v{changes.parent_version}</strong>
-          <small>Current v{revision.version} · {revision.editor_role || 'editor'} revision</small>
-        </span>
-        <span className="revision-comparison__counts">
-          <StatusPill tone="approved">+{changes.added.length}</StatusPill>
-          <StatusPill tone="info">~{changes.modified.length}</StatusPill>
-          <StatusPill tone="rejected">−{changes.removed.length}</StatusPill>
-          {changes.paragraph_comments.length > 0 ? <StatusPill tone="pending">{changes.paragraph_comments.length} comment</StatusPill> : null}
-        </span>
-      </summary>
-      <div className="revision-comparison__body">
-        {changedCount === 0 && changes.paragraph_comments.length === 0 ? <p className="muted">No content changed from the previous handoff.</p> : null}
-        {changes.added.length > 0 ? (
-          <section><h4>Added relations</h4>{changes.added.map((relation) => <p key={relation.logical_relation_id}><span className="change-mark change-mark--added">Added</span>{relationText(relation)}</p>)}</section>
-        ) : null}
-        {changes.modified.length > 0 ? (
-          <section><h4>Modified relations</h4>{changes.modified.map((change) => (
-            <p key={change.after.logical_relation_id}>
-              <span className="change-mark change-mark--modified">Before</span>{relationText(change.before)}
-              <span className="change-arrow">→</span>
-              <span className="change-mark change-mark--modified">After</span>{relationText(change.after)}
-            </p>
-          ))}</section>
-        ) : null}
-        {changes.removed.length > 0 ? (
-          <section><h4>Removed relations</h4>{changes.removed.map((relation) => <p key={relation.logical_relation_id}><span className="change-mark change-mark--removed">Removed</span>{relationText(relation)}</p>)}</section>
-        ) : null}
-        {changes.paragraph_comments.length > 0 ? (
-          <section><h4>Paragraph comment changes</h4>{changes.paragraph_comments.map((change) => (
-            <p key={change.paragraph_id}>
-              <strong>{change.paragraph_id}</strong>: {change.before_text || '(empty)'} <span className="change-arrow">→</span> {change.after_text || '(empty)'}
-            </p>
-          ))}</section>
-        ) : null}
-        <p className="muted">{changes.unchanged_count} unchanged relation{changes.unchanged_count === 1 ? '' : 's'}.</p>
-      </div>
-    </details>
-  );
-}
-
 export function EditorPage() {
   const { currentUser, getAccessToken } = useAuth();
   const {
@@ -155,6 +103,7 @@ export function EditorPage() {
     setEditorDraft,
     ensurePapers,
     ensurePaperDetail,
+    ensureReviewQueue,
     refreshEditorAfterWorkflowChange,
   } = useWorkspaceData();
   const [loading, setLoading] = useState('');
@@ -162,7 +111,6 @@ export function EditorPage() {
   const [status, setStatus] = useState('');
   const [sidebarWidth, setSidebarWidth] = useState(initialSidebarWidth);
   const [isResizingSidebar, setIsResizingSidebar] = useState(false);
-  const [reviewDecisionComment, setReviewDecisionComment] = useState('');
 
   const papers = papersResource.data;
   const selectedPaper = papers.find((paper) => paper.paper_id === paperId);
@@ -279,22 +227,66 @@ export function EditorPage() {
     return grouped;
   }, [paragraphs]);
 
+  const paragraphIdsForRelation = useCallback((relation: RelationRecord) => {
+    if (relation.support_paragraph_id) return [relation.support_paragraph_id];
+    const sentenceIds = relation.support_sentence_ids
+      ? relation.support_sentence_ids.split(';').filter(Boolean)
+      : relation.sentence_id
+        ? [relation.sentence_id]
+        : [];
+    return Array.from(new Set(
+      sentenceIds
+        .map((sentenceId) => paragraphBySentenceId.get(sentenceId))
+        .filter((paragraphId): paragraphId is string => Boolean(paragraphId))
+    ));
+  }, [paragraphBySentenceId]);
+
   const relationsByParagraph = useMemo(() => {
     const grouped = new Map<string, RelationRecord[]>();
     relations.forEach((relation) => {
-      if (relation.support_paragraph_id) {
-        if (!grouped.has(relation.support_paragraph_id)) grouped.set(relation.support_paragraph_id, []);
-        grouped.get(relation.support_paragraph_id)!.push(relation);
-        return;
-      }
-      const ids = relation.support_sentence_ids ? relation.support_sentence_ids.split(';').filter(Boolean) : relation.sentence_id ? [relation.sentence_id] : [];
-      Array.from(new Set(ids.map((sentenceId) => paragraphBySentenceId.get(sentenceId)).filter(Boolean))).forEach((paragraphId) => {
-        if (!grouped.has(paragraphId!)) grouped.set(paragraphId!, []);
-        grouped.get(paragraphId!)!.push(relation);
+      paragraphIdsForRelation(relation).forEach((paragraphId) => {
+        if (!grouped.has(paragraphId)) grouped.set(paragraphId, []);
+        grouped.get(paragraphId)!.push(relation);
       });
     });
     return grouped;
-  }, [paragraphBySentenceId, relations]);
+  }, [paragraphIdsForRelation, relations]);
+
+  const revisionChangesByParagraph = useMemo(() => {
+    const grouped = new Map<string, ParagraphRevisionChanges>();
+    if (!changes) return grouped;
+    const ensureParagraphChanges = (paragraphId: string) => {
+      if (!grouped.has(paragraphId)) {
+        grouped.set(paragraphId, {
+          parentVersion: changes.parent_version,
+          addedRelationIds: new Set<string>(),
+          removedRelations: [],
+          modifiedRelations: [],
+        });
+      }
+      return grouped.get(paragraphId)!;
+    };
+    paragraphs.forEach((paragraph) => ensureParagraphChanges(paragraph.paragraph_id));
+    changes.added.forEach((relation) => {
+      paragraphIdsForRelation(relation).forEach((paragraphId) => {
+        ensureParagraphChanges(paragraphId).addedRelationIds.add(relation.logical_relation_id || relation.relation_id);
+      });
+    });
+    changes.removed.forEach((relation) => {
+      paragraphIdsForRelation(relation).forEach((paragraphId) => {
+        ensureParagraphChanges(paragraphId).removedRelations.push(relation);
+      });
+    });
+    changes.modified.forEach((change) => {
+      paragraphIdsForRelation(change.after).forEach((paragraphId) => {
+        ensureParagraphChanges(paragraphId).modifiedRelations.push(change);
+      });
+    });
+    changes.paragraph_comments.forEach((commentChange) => {
+      ensureParagraphChanges(commentChange.paragraph_id).commentChange = commentChange;
+    });
+    return grouped;
+  }, [changes, paragraphIdsForRelation, paragraphs]);
 
   const totalItems = paragraphs.length;
   const progressPercent = totalItems > 0 ? Math.min(100, Math.round((currentSentenceIndex / totalItems) * 100)) : 0;
@@ -320,7 +312,9 @@ export function EditorPage() {
     && !dirty
   );
   const editorAccessMessage = !activeAssignment
-    ? 'Create an assignment before editing this paper.'
+    ? isReviewerEditor
+      ? 'You can inspect this paper, but you can edit only papers assigned to you after the annotator submits them.'
+      : 'Create an assignment before editing this paper.'
     : isReviewerEditor && canEditRelations
       ? 'You are editing a reviewer draft. Save it before returning or approving this version.'
     : activeAssignment.status === 'submitted'
@@ -401,6 +395,7 @@ export function EditorPage() {
         dirty: false,
       }));
       await refreshEditorAfterWorkflowChange(paperId);
+      if (isReviewerEditor) await ensureReviewQueue('submitted', true);
       setMessage({ type: 'success', text: isReviewerEditor ? 'Reviewer draft saved' : 'Draft saved' });
     });
   }
@@ -419,9 +414,11 @@ export function EditorPage() {
     if (!activeAssignment?.latest_submission_id || !canCompleteReview) return;
     await run('return-submission', async () => {
       const token = await getAccessToken();
-      await returnReviewSubmission(token, activeAssignment.latest_submission_id!, reviewDecisionComment);
-      setReviewDecisionComment('');
-      await refreshEditorAfterWorkflowChange(paperId);
+      await returnReviewSubmission(token, activeAssignment.latest_submission_id!, '');
+      await Promise.all([
+        refreshEditorAfterWorkflowChange(paperId),
+        ensureReviewQueue('submitted', true),
+      ]);
       setMessage({ type: 'success', text: 'Returned to the annotator with this revision preserved' });
     });
   }
@@ -430,9 +427,11 @@ export function EditorPage() {
     if (!activeAssignment?.latest_submission_id || !canCompleteReview) return;
     await run('approve-submission', async () => {
       const token = await getAccessToken();
-      await approveReviewSubmission(token, activeAssignment.latest_submission_id!, reviewDecisionComment);
-      setReviewDecisionComment('');
-      await refreshEditorAfterWorkflowChange(paperId);
+      await approveReviewSubmission(token, activeAssignment.latest_submission_id!, '');
+      await Promise.all([
+        refreshEditorAfterWorkflowChange(paperId),
+        ensureReviewQueue('submitted', true),
+      ]);
       setMessage({ type: 'success', text: 'Latest reviewer-visible revision approved as final' });
     });
   }
@@ -554,19 +553,6 @@ export function EditorPage() {
           </div>
           {editorAccessMessage ? <MessageBanner type="info" text={editorAccessMessage} /> : null}
           {activeAssignment?.latest_review_comment ? <MessageBanner type="info" text={`Reviewer comment: ${activeAssignment.latest_review_comment}`} /> : null}
-          {isReviewerEditor && canEditRelations ? (
-            <label className="review-decision-editor">
-              <span>Return / approval note</span>
-              <textarea
-                value={reviewDecisionComment}
-                onChange={(event) => setReviewDecisionComment(event.target.value)}
-                placeholder="Optional note saved with the return or approval decision"
-                rows={2}
-              />
-              {dirty ? <small>Save the reviewer draft before returning or approving.</small> : null}
-            </label>
-          ) : null}
-          {revision && changes ? <RevisionComparison revision={revision} changes={changes} /> : null}
           {warnings.length > 0 ? (
             <div className="warning-stack">
               {warnings.map((warning) => <MessageBanner key={warning} type="info" text={warning} />)}
@@ -584,6 +570,7 @@ export function EditorPage() {
                 sentences={paragraph.sentence_ids.map((sentenceId) => sentenceById.get(sentenceId)).filter((sentence): sentence is SentenceRecord => Boolean(sentence))}
                 mentionsBySentence={mentionsBySentence}
                 relations={relationsByParagraph.get(paragraph.paragraph_id) ?? []}
+                revisionChanges={revisionChangesByParagraph.get(paragraph.paragraph_id)}
                 comment={paragraphComments[paragraph.paragraph_id] ?? ''}
                 onAddPredicate={handleAddDirectPredicate}
                 onDelete={(relationId) => commitRelations((current) => current.filter((item) => (item.logical_relation_id || item.relation_id) !== relationId))}

@@ -4,16 +4,22 @@ import { IconButton } from '../ui/Primitives';
 
 type Props = {
   relation: RelationRecord;
+  changeType?: 'added' | 'modified' | 'removed' | 'unchanged';
   onDelete?: (relationId: string) => void;
   onEdit?: (relation: RelationRecord) => void;
-  supportLabelOverride?: string;
 };
 
-export default function RelationPill({ relation, onDelete, onEdit, supportLabelOverride }: Props) {
-  const supportLabel = supportLabelOverride || relation.support_paragraph_id || relation.support_sentence_ids;
+export default function RelationPill({ relation, changeType, onDelete, onEdit }: Props) {
+  const changeLabel = changeType === 'added'
+    ? 'New'
+    : changeType === 'modified'
+      ? 'Modified'
+      : changeType === 'removed'
+        ? 'Deleted'
+        : '';
 
   return (
-    <span className="relation-pill">
+    <span className={`relation-pill${changeType ? ` relation-pill--${changeType}` : ''}`}>
       <span className="relation-pill__label">
         <span className="relation-pill__entity">{relation.subject_text}</span>
         <ArrowRight aria-hidden="true" size={12} />
@@ -21,7 +27,7 @@ export default function RelationPill({ relation, onDelete, onEdit, supportLabelO
         <ArrowRight aria-hidden="true" size={12} />
         <span className="relation-pill__entity">{relation.object_text}</span>
       </span>
-      {supportLabel ? <span className="relation-pill__support">{supportLabel}</span> : null}
+      {changeLabel ? <span className="relation-pill__change-label">{changeLabel}</span> : null}
       {onEdit ? (
         <IconButton
           className="relation-pill__edit"

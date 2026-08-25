@@ -18,16 +18,19 @@ function nextRouteForSession({
   hasProfile,
   isVerified,
   isApproved,
+  role,
 }: {
   hasFirebaseUser: boolean;
   hasProfile: boolean;
   isVerified: boolean;
   isApproved: boolean;
+  role?: string;
 }) {
   if (!hasFirebaseUser) return '/signin';
   if (!isVerified) return '/verify-email';
   if (!hasProfile) return '/complete-profile';
   if (!isApproved) return '/account-status';
+  if (role === 'reviewer') return '/app/review';
   return '/app/editor';
 }
 
@@ -43,10 +46,16 @@ export function RootRedirect() {
         hasProfile: Boolean(currentUser),
         isVerified: Boolean(isFirebaseVerified || currentUser?.email_verified),
         isApproved,
+        role: currentUser?.role,
       })}
       replace
     />
   );
+}
+
+export function WorkspaceIndexRedirect() {
+  const { currentUser } = useAuth();
+  return <Navigate to={currentUser?.role === 'reviewer' ? '/app/review' : '/app/editor'} replace />;
 }
 
 export function PublicOnlyRoute() {

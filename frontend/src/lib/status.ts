@@ -14,7 +14,17 @@ export function errorMessage(error: unknown): string {
 
 export function formatDate(value: string | null): string {
   if (!value) return '-';
-  return new Date(value).toLocaleString();
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return new Intl.DateTimeFormat(undefined, {
+    year: 'numeric',
+    month: 'numeric',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    second: '2-digit',
+    timeZoneName: 'short',
+  }).format(date);
 }
 
 export function formatCalendarDate(value: string | null): string {

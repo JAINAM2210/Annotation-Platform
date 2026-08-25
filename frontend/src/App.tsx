@@ -20,6 +20,7 @@ import {
   RequireMissingProfile,
   RequireRequestsAccess,
   RootRedirect,
+  WorkspaceIndexRedirect,
 } from './routes/RouteGuards';
 import { ThemeProvider } from './theme/ThemeContext';
 import { LoadingScreen } from './ui/LoadingScreen';
@@ -49,7 +50,7 @@ export default function App() {
             </Route>
             <Route element={<RequireApprovedUser />}>
               <Route path="/app" element={<WorkspaceLayout />}>
-                <Route index element={<Navigate to="/app/editor" replace />} />
+                <Route index element={<WorkspaceIndexRedirect />} />
                 <Route path="editor" element={<EditorPage />} />
                 <Route path="assignments" element={<AssignmentsPage />} />
                 <Route path="exports" element={<ExportsPage />} />

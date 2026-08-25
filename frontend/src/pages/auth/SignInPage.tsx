@@ -23,8 +23,8 @@ export function SignInPage() {
     try {
       await ensureFirebaseSessionPersistence();
       await signInWithEmailAndPassword(firebaseAuth, form.email.trim(), form.password);
-      await syncCurrentUser(true);
-      navigate('/', { replace: true });
+      const profile = await syncCurrentUser(true);
+      navigate(profile?.role === 'reviewer' ? '/app/review' : '/', { replace: true });
     } catch (error) {
       setMessage({ type: 'error', text: errorMessage(error) });
     } finally {

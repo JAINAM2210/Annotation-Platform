@@ -195,7 +195,7 @@ export function buildCustomParagraphRelation(args: {
     confidence: 1.0,
     accepted: true,
     evidence_text: args.paragraphText,
-    relation_origin: '',
+    relation_origin: 'manual_edit',
     inherited_from: '',
     support_sentence_ids: '',
     support_paragraph_id: args.paragraphId,
