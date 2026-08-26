@@ -89,8 +89,17 @@ function WorkspaceFrame() {
     };
 
     refreshPendingRequests(false);
-    const intervalId = window.setInterval(() => refreshPendingRequests(true), 60000);
-    return () => window.clearInterval(intervalId);
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === 'visible') refreshPendingRequests(true);
+    };
+    const intervalId = window.setInterval(() => refreshPendingRequests(true), 15000);
+    window.addEventListener('focus', refreshWhenVisible);
+    document.addEventListener('visibilitychange', refreshWhenVisible);
+    return () => {
+      window.clearInterval(intervalId);
+      window.removeEventListener('focus', refreshWhenVisible);
+      document.removeEventListener('visibilitychange', refreshWhenVisible);
+    };
   }, [canReview, ensureAnnotatorRequests, ensureReviewQueue, ensureReviewerRequests, mayManageAnnotators, mayManageReviewers]);
 
   async function handleSignOut() {

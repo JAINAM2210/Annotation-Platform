@@ -166,7 +166,7 @@ export function RequestAccessPage() {
               <strong>{form.email.trim()}</strong>
               <button type="button" onClick={() => setStep('account')}>Edit account</button>
             </div>
-            <Field label="Full name">
+            <Field label="Full name" required>
               <input
                 autoComplete="name"
                 value={form.full_name}

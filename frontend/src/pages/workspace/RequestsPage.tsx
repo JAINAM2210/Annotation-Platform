@@ -149,8 +149,8 @@ export function RequestsPage() {
   }
 
   useEffect(() => {
-    void run('load-requests', () => refreshRequests(false));
-  }, [annotatorRequests, ensureAnnotatorRequests, ensureReviewerRequests, mayManageAnnotators, mayManageReviewers, requestStatus.annotator, requestStatus.reviewer, reviewerRequests]);
+    void run('load-requests', () => refreshRequests(true));
+  }, [mayManageAnnotators, mayManageReviewers, requestStatus.annotator, requestStatus.reviewer]);
 
   function handleApproveAnnotator(userId: string) {
     void run(`approve-annotator-${userId}`, async () => {
@@ -224,7 +224,6 @@ export function RequestsPage() {
         actions={<Button variant="secondary" size="compact" icon={RefreshCw} onClick={() => void run('refresh-requests', () => refreshRequests(true))} disabled={Boolean(loading)}>Refresh</Button>}
       />
       <MessageBanner type={message.type} text={message.text} />
-      {annotatorResource.refreshing || reviewerResource.refreshing ? <MessageBanner type="info" text="Refreshing request queues in the background." /> : null}
       {annotatorResource.error || reviewerResource.error ? <MessageBanner type="error" text={annotatorResource.error || reviewerResource.error} /> : null}
       <section className="management-panel">
         {mayManageAnnotators ? (

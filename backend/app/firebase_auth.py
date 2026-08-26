@@ -27,6 +27,9 @@ class FirebaseUserManagementError(RuntimeError):
     pass
 
 
+FIREBASE_USER_LOOKUP_BATCH_SIZE = 100
+
+
 def _load_firebase_modules():
     try:
         import firebase_admin
@@ -91,6 +94,29 @@ def verify_firebase_token(token: str) -> FirebaseIdentity:
         email_verified=bool(payload.get("email_verified", False)),
         name=str(payload.get("name") or "").strip() or None,
     )
+
+
+def get_firebase_email_verification_statuses(firebase_uids: list[str]) -> dict[str, bool]:
+    unique_uids = list(dict.fromkeys(uid.strip() for uid in firebase_uids if uid.strip()))
+    if not unique_uids:
+        return {}
+
+    _, auth, _ = _load_firebase_modules()
+    statuses: dict[str, bool] = {}
+    try:
+        for offset in range(0, len(unique_uids), FIREBASE_USER_LOOKUP_BATCH_SIZE):
+            batch = unique_uids[offset : offset + FIREBASE_USER_LOOKUP_BATCH_SIZE]
+            result = auth.get_users(
+                [auth.UidIdentifier(uid) for uid in batch],
+                app=get_firebase_app(),
+            )
+            statuses.update({user.uid: bool(user.email_verified) for user in result.users})
+    except FirebaseConfigurationError:
+        raise
+    except Exception as exc:  # pragma: no cover - depends on firebase-admin runtime behavior
+        raise FirebaseUserManagementError("Failed to read Firebase email verification statuses") from exc
+
+    return statuses
 
 
 def disable_firebase_user(firebase_uid: str) -> None:

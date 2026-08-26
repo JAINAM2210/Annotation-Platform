@@ -7,7 +7,11 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.auth_services import deactivate_user_account, reactivate_user_account
+from app.auth_services import (
+    deactivate_user_account,
+    reactivate_user_account,
+    sync_pending_email_verifications,
+)
 from app.database import get_db
 from app.dependencies import require_admin
 from app.firebase_auth import FirebaseConfigurationError, FirebaseUserManagementError
@@ -30,6 +34,8 @@ def list_signup_requests(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Admin signup request endpoint manages reviewer requests only",
         )
+    if status_filter == UserStatus.pending:
+        sync_pending_email_verifications(db, UserRole.reviewer)
     statement = (
         select(UserProfile)
         .where(

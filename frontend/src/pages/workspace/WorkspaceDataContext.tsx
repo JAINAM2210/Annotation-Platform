@@ -29,6 +29,7 @@ import type {
 } from '../../types';
 
 const STALE_AFTER_MS = 120000;
+const PENDING_REQUEST_STALE_AFTER_MS = 10000;
 
 export type WorkspaceResource<T> = {
   data: T;
@@ -370,7 +371,8 @@ export function WorkspaceDataProvider({ children }: { children: ReactNode }) {
 
   const ensureAnnotatorRequests = useCallback(async (status: UserStatus, force = false) => {
     const resource = annotatorRequests[status];
-    if (!force && resource.lastLoadedAt && isFresh(resource)) return resource.data;
+    const cacheLifetime = status === 'pending' ? PENDING_REQUEST_STALE_AFTER_MS : STALE_AFTER_MS;
+    if (!force && resource.lastLoadedAt && now() - resource.lastLoadedAt < cacheLifetime) return resource.data;
     const hadData = resource.lastLoadedAt > 0;
     setAnnotatorRequests((items) => ({ ...items, [status]: { ...items[status], initialLoading: !hadData, refreshing: hadData, error: '' } }));
     return dedupe(`annotator-requests:${status}`, async () => {
@@ -389,7 +391,8 @@ export function WorkspaceDataProvider({ children }: { children: ReactNode }) {
 
   const ensureReviewerRequests = useCallback(async (status: UserStatus, force = false) => {
     const resource = reviewerRequests[status];
-    if (!force && resource.lastLoadedAt && isFresh(resource)) return resource.data;
+    const cacheLifetime = status === 'pending' ? PENDING_REQUEST_STALE_AFTER_MS : STALE_AFTER_MS;
+    if (!force && resource.lastLoadedAt && now() - resource.lastLoadedAt < cacheLifetime) return resource.data;
     const hadData = resource.lastLoadedAt > 0;
     setReviewerRequests((items) => ({ ...items, [status]: { ...items[status], initialLoading: !hadData, refreshing: hadData, error: '' } }));
     return dedupe(`reviewer-requests:${status}`, async () => {

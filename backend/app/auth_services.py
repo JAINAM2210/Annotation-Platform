@@ -1,13 +1,24 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
-from app.firebase_auth import FirebaseIdentity, disable_firebase_user, enable_firebase_user
+from app.firebase_auth import (
+    FirebaseConfigurationError,
+    FirebaseIdentity,
+    FirebaseUserManagementError,
+    disable_firebase_user,
+    enable_firebase_user,
+    get_firebase_email_verification_statuses,
+)
 from app.models import RegisterProfileRequest, UserProfile, UserRole, UserStatus, clean_text, normalize_email
+
+
+logger = logging.getLogger(__name__)
 
 
 class ProfileConflictError(ValueError):
@@ -148,6 +159,47 @@ def sync_user_from_identity(db: Session, identity: FirebaseIdentity) -> UserProf
     db.commit()
     db.refresh(user)
     return user
+
+
+def sync_pending_email_verifications(db: Session, role: UserRole) -> int:
+    pending_users = list(
+        db.scalars(
+            select(UserProfile).where(
+                UserProfile.role == role,
+                UserProfile.status == UserStatus.pending,
+                UserProfile.email_verified.is_(False),
+                UserProfile.is_active.is_(True),
+                UserProfile.firebase_uid.is_not(None),
+            )
+        ).all()
+    )
+    if not pending_users:
+        return 0
+
+    try:
+        verification_statuses = get_firebase_email_verification_statuses(
+            [user.firebase_uid for user in pending_users if user.firebase_uid]
+        )
+    except (FirebaseConfigurationError, FirebaseUserManagementError):
+        logger.warning(
+            "Unable to synchronize pending %s email verification statuses from Firebase",
+            role.value,
+            exc_info=True,
+        )
+        return 0
+
+    verified_at = utc_now()
+    updated_count = 0
+    for user in pending_users:
+        if not user.firebase_uid or not verification_statuses.get(user.firebase_uid, False):
+            continue
+        user.email_verified = True
+        user.email_verified_at = user.email_verified_at or verified_at
+        updated_count += 1
+
+    if updated_count:
+        db.commit()
+    return updated_count
 
 
 def deactivate_user_account(db: Session, user: UserProfile) -> UserProfile:

@@ -59,6 +59,13 @@ class FakeFirebaseAuth:
         if user is not None:
             user.disabled = False
 
+    def get_email_verification_statuses(self, firebase_uids: list[str]) -> dict[str, bool]:
+        return {
+            firebase_uid: user.email_verified
+            for firebase_uid in firebase_uids
+            if (user := self._users_by_uid.get(firebase_uid)) is not None
+        }
+
 
 @pytest.fixture()
 def client(tmp_path, monkeypatch):
@@ -80,6 +87,11 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(dependencies, "verify_firebase_token", fake_firebase.verify_token)
     monkeypatch.setattr(auth_services, "disable_firebase_user", fake_firebase.disable_user)
     monkeypatch.setattr(auth_services, "enable_firebase_user", fake_firebase.enable_user)
+    monkeypatch.setattr(
+        auth_services,
+        "get_firebase_email_verification_statuses",
+        fake_firebase.get_email_verification_statuses,
+    )
 
     with TestClient(app) as test_client:
         test_client.fake_firebase = fake_firebase  # type: ignore[attr-defined]
@@ -187,6 +199,52 @@ def test_unverified_users_are_hidden_from_approval_queues(client: TestClient):
     assert reviewers.status_code == 200
     assert annotators.json() == []
     assert reviewers.json() == []
+
+
+def test_firebase_verification_sync_makes_requests_visible_without_requester_refresh(client: TestClient):
+    admin = admin_token(client)
+    refresh_me(client, admin)
+    annotator_token = firebase_token(client, "verified-later-annotator@example.com", verified=False)
+    reviewer_token = firebase_token(client, "verified-later-reviewer@example.com", verified=False)
+    annotator = register_profile(client, annotator_token, full_name="Verified Later Annotator", role="annotator")
+    reviewer = register_profile(client, reviewer_token, full_name="Verified Later Reviewer", role="reviewer")
+
+    client.fake_firebase.set_verified(annotator_token, True)  # type: ignore[attr-defined]
+    client.fake_firebase.set_verified(reviewer_token, True)  # type: ignore[attr-defined]
+
+    annotators = client.get("/reviewer/signup-requests?status=pending", headers=auth_headers(admin))
+    reviewers = client.get("/admin/signup-requests?status=pending&role=reviewer", headers=auth_headers(admin))
+
+    assert annotators.status_code == 200
+    assert reviewers.status_code == 200
+    assert [item["id"] for item in annotators.json()] == [annotator["id"]]
+    assert [item["id"] for item in reviewers.json()] == [reviewer["id"]]
+    assert annotators.json()[0]["email_verified"] is True
+    assert reviewers.json()[0]["email_verified"] is True
+
+
+def test_firebase_verification_sync_failure_keeps_unverified_request_hidden(
+    client: TestClient,
+    monkeypatch,
+):
+    from app import auth_services
+    from app.firebase_auth import FirebaseUserManagementError
+
+    admin = admin_token(client)
+    refresh_me(client, admin)
+    annotator_token = firebase_token(client, "lookup-failure@example.com", verified=False)
+    register_profile(client, annotator_token, full_name="Lookup Failure", role="annotator")
+    client.fake_firebase.set_verified(annotator_token, True)  # type: ignore[attr-defined]
+
+    def fail_lookup(_firebase_uids: list[str]) -> dict[str, bool]:
+        raise FirebaseUserManagementError("Firebase is temporarily unavailable")
+
+    monkeypatch.setattr(auth_services, "get_firebase_email_verification_statuses", fail_lookup)
+
+    response = client.get("/reviewer/signup-requests?status=pending", headers=auth_headers(admin))
+
+    assert response.status_code == 200
+    assert response.json() == []
 
 
 def test_pending_user_cannot_access_editor_apis(client: TestClient):
@@ -556,6 +614,125 @@ def test_saving_suggestion_preserves_suggested_relation_provenance(client: TestC
     assert row is not None
     assert row["suggested_relation_id"] == ids["suggestion"]
     assert row["action"] == "keep"
+
+
+def test_first_annotator_submission_compares_v1_with_assignment_v0(client: TestClient):
+    from uuid import uuid4
+
+    from sqlalchemy import text
+
+    from app.database import engine
+
+    _, reviewer_token, _, annotator_token, annotator = approved_reviewer_and_annotator(client)
+    paper_id = "paper_initial_v1_diff"
+    ids = seed_editor_paper(paper_id)
+    removed_suggestion_id = str(uuid4())
+    with engine.begin() as connection:
+        connection.execute(text(
+            """
+            INSERT INTO suggested_relations (
+                id, suggestion_set_id, paper_id, relation_key, sentence_id, support_paragraph_id,
+                subject_mention_id, object_mention_id, subject_text, subject_type, predicate,
+                object_text, object_type, confidence, accepted, evidence_text, relation_origin,
+                inherited_from, raw_payload
+            ) VALUES (
+                :id, :suggestion_set_id, :paper_uuid, :relation_key, :sentence_id, :paragraph_id,
+                :subject_mention_id, :object_mention_id, 'Plasma source', 'Plasma Source', 'powers',
+                'voltage', 'Quantity', 1.0, 1, 'Plasma source measures voltage.', 'test', '', NULL
+            )
+            """
+        ), {
+            "id": removed_suggestion_id,
+            "suggestion_set_id": ids["suggestion_set"],
+            "paper_uuid": ids["paper"],
+            "relation_key": f"{paper_id}:r0002",
+            "sentence_id": ids["sentence"],
+            "paragraph_id": ids["paragraph"],
+            "subject_mention_id": ids["mention_subject"],
+            "object_mention_id": ids["mention_object"],
+        })
+        connection.execute(text(
+            """
+            INSERT INTO suggested_relation_support_sentences (suggested_relation_id, sentence_id)
+            VALUES (:suggested_relation_id, :sentence_id)
+            """
+        ), {"suggested_relation_id": removed_suggestion_id, "sentence_id": ids["sentence"]})
+
+    assignment = client.post(
+        "/assignments",
+        headers=auth_headers(reviewer_token),
+        json={"paper_id": paper_id, "annotator_id": annotator["id"]},
+    )
+    assert assignment.status_code == 200
+    assert assignment.json()["latest_submission_version"] == 0
+    assert assignment.json()["latest_submission_status"] == "baseline"
+
+    annotator_detail = client.get(f"/paper/{paper_id}", headers=auth_headers(annotator_token)).json()
+    original = next(relation for relation in annotator_detail["relations"] if relation["relation_id"].endswith("r0001"))
+    modified = {**original, "predicate": "annotatorUpdatedPredicate"}
+    added = {
+        **original,
+        "relation_id": "custom_initial_v1_added",
+        "logical_relation_id": str(uuid4()),
+        "sentence_id": "",
+        "subject_text": "custom subject",
+        "subject_type": "custom",
+        "predicate": "customPredicate",
+        "object_text": "custom object",
+        "object_type": "custom",
+        "evidence_text": annotator_detail["paragraphs"][0]["text"],
+        "relation_origin": "manual_edit",
+        "support_sentence_ids": "",
+        "support_paragraph_id": annotator_detail["paragraphs"][0]["paragraph_id"],
+    }
+    saved = client.post(
+        f"/paper/{paper_id}/relations/save",
+        headers=auth_headers(annotator_token),
+        json={
+            "dataset": "raw",
+            "paper_id": paper_id,
+            "editor_mode": "paragraph",
+            "base_submission_id": assignment.json()["latest_submission_id"],
+            "relations": [modified, added],
+        },
+    )
+    assert saved.status_code == 200
+    submitted = client.post(
+        f"/assignments/{assignment.json()['id']}/submit",
+        headers=auth_headers(annotator_token),
+    )
+    assert submitted.status_code == 200
+
+    reviewer_detail = client.get(f"/paper/{paper_id}", headers=auth_headers(reviewer_token)).json()
+    assert reviewer_detail["revision"]["version"] == 1
+    assert reviewer_detail["revision"]["parent_version"] == 0
+    assert reviewer_detail["changes"]["parent_version"] == 0
+    assert [relation["predicate"] for relation in reviewer_detail["changes"]["added"]] == ["customPredicate"]
+    assert [relation["predicate"] for relation in reviewer_detail["changes"]["removed"]] == ["powers"]
+    assert reviewer_detail["changes"]["modified"][0]["before"]["predicate"] == "measures"
+    assert reviewer_detail["changes"]["modified"][0]["after"]["predicate"] == "annotatorUpdatedPredicate"
+
+    # Legacy first revisions without a persisted parent still compare against a virtual v0.
+    with engine.begin() as connection:
+        connection.execute(text(
+            """
+            UPDATE annotation_submissions
+            SET parent_submission_id = NULL
+            WHERE assignment_id = :assignment_id AND version = 1
+            """
+        ), {"assignment_id": assignment.json()["id"]})
+        connection.execute(text(
+            """
+            DELETE FROM annotation_submissions
+            WHERE assignment_id = :assignment_id AND version = 0
+            """
+        ), {"assignment_id": assignment.json()["id"]})
+    legacy_detail = client.get(f"/paper/{paper_id}", headers=auth_headers(reviewer_token)).json()
+    assert legacy_detail["revision"]["parent_version"] is None
+    assert legacy_detail["changes"]["parent_version"] == 0
+    assert len(legacy_detail["changes"]["added"]) == 1
+    assert len(legacy_detail["changes"]["removed"]) == 1
+    assert len(legacy_detail["changes"]["modified"]) == 1
 
 
 def test_paragraph_comments_are_saved_and_loaded_with_submission(client: TestClient):

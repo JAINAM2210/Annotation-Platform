@@ -165,6 +165,7 @@ function nextEnabledIndex(options: SelectOption[], currentIndex: number, directi
 
 type SelectMenuGeometry = {
   placement: 'top' | 'bottom';
+  previewPlacement: 'left' | 'right';
   style: CSSProperties;
   previewStyle: CSSProperties;
 };
@@ -190,6 +191,7 @@ export function SelectControl({
   const [menuStyle, setMenuStyle] = useState<CSSProperties>({});
   const [previewStyle, setPreviewStyle] = useState<CSSProperties>({});
   const [menuPlacement, setMenuPlacement] = useState<'top' | 'bottom'>('bottom');
+  const [previewPlacement, setPreviewPlacement] = useState<'left' | 'right'>('right');
   const selectedOption = options.find((option) => option.value === value);
   const visibleOptions = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
@@ -220,10 +222,18 @@ export function SelectControl({
     const availableSpace = Math.max(180, shouldOpenBelow ? spaceBelow : spaceAbove);
     const maxHeight = Math.min(className?.includes('select-control--paper') ? 340 : 360, availableSpace);
     const previewGap = 14;
-    const previewWidth = Math.min(360, Math.max(220, window.innerWidth - rect.right - previewGap - viewportMargin));
+    const spaceRight = window.innerWidth - rect.right - previewGap - viewportMargin;
+    const spaceLeft = rect.left - previewGap - viewportMargin;
+    const shouldPlacePreviewRight = spaceRight >= 260 || spaceRight >= spaceLeft;
+    const previewAvailableSpace = shouldPlacePreviewRight ? spaceRight : spaceLeft;
+    const previewWidth = Math.min(360, Math.max(220, previewAvailableSpace));
+    const previewLeft = shouldPlacePreviewRight
+      ? rect.right + previewGap
+      : Math.max(viewportMargin, rect.left - previewGap - previewWidth);
 
     return {
       placement: shouldOpenBelow ? 'bottom' : 'top',
+      previewPlacement: shouldPlacePreviewRight ? 'right' : 'left',
       style: {
         left: Math.round(rect.left),
         top: shouldOpenBelow ? Math.round(rect.bottom + gap) : undefined,
@@ -233,7 +243,7 @@ export function SelectControl({
         minHeight: searchable ? Math.min(260, maxHeight) : undefined,
       },
       previewStyle: {
-        left: Math.round(rect.right + previewGap),
+        left: Math.round(previewLeft),
         top: Math.round(rect.top),
         width: previewWidth,
       },
@@ -244,6 +254,7 @@ export function SelectControl({
     const geometry = computeMenuGeometry();
     if (!geometry) return;
     setMenuPlacement(geometry.placement);
+    setPreviewPlacement(geometry.previewPlacement);
     setMenuStyle(geometry.style);
     setPreviewStyle(geometry.previewStyle);
   };
@@ -252,6 +263,7 @@ export function SelectControl({
     const geometry = computeMenuGeometry();
     if (geometry) {
       setMenuPlacement(geometry.placement);
+      setPreviewPlacement(geometry.previewPlacement);
       setMenuStyle(geometry.style);
       setPreviewStyle(geometry.previewStyle);
     }
@@ -430,7 +442,7 @@ export function SelectControl({
         </div>
       ) : null}
       {open && descriptionMode === 'tooltip' && activeOption ? (
-        <div className="select-control__preview-card" aria-hidden="true" style={resolvedPreviewStyle}>
+        <div className={cx('select-control__preview-card', `select-control__preview-card--${previewPlacement}`)} aria-hidden="true" style={resolvedPreviewStyle}>
           <span>{activeOption.meta ?? activeOption.value}</span>
           <strong>{activeOption.previewTitle ?? activeOption.description ?? activeOption.label}</strong>
           {activeOption.previewDescription ? <small>{activeOption.previewDescription}</small> : null}
@@ -444,14 +456,16 @@ export function Field({
   label,
   children,
   hint,
+  required = false,
 }: {
   label: string;
   children: ReactNode;
   hint?: string;
+  required?: boolean;
 }) {
   return (
     <label className="field">
-      <span>{label}</span>
+      <span>{label}{required ? <span className="field__required" aria-hidden="true"> *</span> : null}</span>
       {children}
       {hint ? <small>{hint}</small> : null}
     </label>

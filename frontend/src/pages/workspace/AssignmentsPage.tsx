@@ -222,7 +222,39 @@ export function AssignmentsPage() {
           <span className="muted">{assignments.initialLoading ? 'Loading...' : `${assignments.data.length} loaded`}</span>
         </div>
 
-        {canAssign ? (
+        {assignments.initialLoading ? (
+          <div className="loading-card">Loading assignments...</div>
+        ) : assignments.data.length === 0 ? (
+          <EmptyState icon={ClipboardList} title="No assignments yet" description={canAssign ? 'Create an assignment to begin the annotation workflow.' : 'Your reviewer has not assigned a paper yet.'} />
+        ) : (
+          <DataTable>
+            <table>
+              <thead><tr><th>Paper</th><th>Annotator</th><th>Reviewer</th><th>Status</th><th>Version</th><th>Due</th><th>Submitted</th><th>Action</th></tr></thead>
+              <tbody>
+                {assignments.data.map((assignment) => (
+                  <tr key={assignment.id}>
+                    <td><strong>{assignment.paper_id}</strong><span>{assignment.paper_title}</span></td>
+                    <td><strong>{assignment.annotator_name || '-'}</strong><span>{assignment.annotator_email}</span></td>
+                    <td><strong>{assignment.reviewer_name || '-'}</strong><span>{assignment.reviewer_email}</span></td>
+                    <td><StatusPill tone={assignmentTone(assignment.status)}>{assignment.status}</StatusPill></td>
+                    <td>{assignment.latest_submission_version ? `v${assignment.latest_submission_version}` : '-'}</td>
+                    <td>{formatCalendarDate(assignment.due_at)}</td>
+                    <td>{formatDate(assignment.submitted_at)}</td>
+                    <td>
+                      {canAssign && assignment.status !== 'approved' && assignment.status !== 'cancelled' ? (
+                        <Button variant="danger" size="compact" icon={XCircle} onClick={() => handleCancelAssignment(assignment)} disabled={Boolean(loading)}>Cancel</Button>
+                      ) : <span className="muted">-</span>}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </DataTable>
+        )}
+      </section>
+
+      {canAssign ? (
+        <section className="management-card management-card--wide assignment-history-card">
           <div className="assignment-history-panel">
             <div className="assignment-history-panel__top">
               <div>
@@ -288,38 +320,8 @@ export function AssignmentsPage() {
               </>
             ) : null}
           </div>
-        ) : null}
-
-        {assignments.initialLoading ? (
-          <div className="loading-card">Loading assignments...</div>
-        ) : assignments.data.length === 0 ? (
-          <EmptyState icon={ClipboardList} title="No assignments yet" description={canAssign ? 'Create an assignment to begin the annotation workflow.' : 'Your reviewer has not assigned a paper yet.'} />
-        ) : (
-          <DataTable>
-            <table>
-              <thead><tr><th>Paper</th><th>Annotator</th><th>Reviewer</th><th>Status</th><th>Version</th><th>Due</th><th>Submitted</th><th>Action</th></tr></thead>
-              <tbody>
-                {assignments.data.map((assignment) => (
-                  <tr key={assignment.id}>
-                    <td><strong>{assignment.paper_id}</strong><span>{assignment.paper_title}</span></td>
-                    <td><strong>{assignment.annotator_name || '-'}</strong><span>{assignment.annotator_email}</span></td>
-                    <td><strong>{assignment.reviewer_name || '-'}</strong><span>{assignment.reviewer_email}</span></td>
-                    <td><StatusPill tone={assignmentTone(assignment.status)}>{assignment.status}</StatusPill></td>
-                    <td>{assignment.latest_submission_version ? `v${assignment.latest_submission_version}` : '-'}</td>
-                    <td>{formatCalendarDate(assignment.due_at)}</td>
-                    <td>{formatDate(assignment.submitted_at)}</td>
-                    <td>
-                      {canAssign && assignment.status !== 'approved' && assignment.status !== 'cancelled' ? (
-                        <Button variant="danger" size="compact" icon={XCircle} onClick={() => handleCancelAssignment(assignment)} disabled={Boolean(loading)}>Cancel</Button>
-                      ) : <span className="muted">-</span>}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </DataTable>
-        )}
-      </section>
+        </section>
+      ) : null}
     </main>
   );
 }

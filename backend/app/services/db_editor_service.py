@@ -692,18 +692,36 @@ def _revision_changes(
     paragraph_uuid_to_key: dict[str, str],
     sentence_uuid_to_paragraph_key: dict[str, str],
 ) -> RevisionChanges | None:
-    if revision is None or not revision.parent_submission_id or revision.parent_version is None:
+    if revision is None:
         return None
 
-    parent_relations = _load_submission_relations(
-        db,
-        revision.parent_submission_id,
-        paper,
-        sentence_uuid_to_key,
-        paragraph_uuid_to_key,
-        sentence_uuid_to_paragraph_key,
-    )
-    parent_comments = _load_paragraph_comments(db, revision.parent_submission_id, paragraph_uuid_to_key)
+    if revision.parent_submission_id and revision.parent_version is not None:
+        parent_submission_id = revision.parent_submission_id
+        parent_version = revision.parent_version
+        parent_relations = _load_submission_relations(
+            db,
+            parent_submission_id,
+            paper,
+            sentence_uuid_to_key,
+            paragraph_uuid_to_key,
+            sentence_uuid_to_paragraph_key,
+        )
+        parent_comments = _load_paragraph_comments(db, parent_submission_id, paragraph_uuid_to_key)
+    elif revision.version == 1:
+        # Support first revisions created before immutable assignment baselines existed.
+        parent_submission_id = f"baseline:{paper.uuid}"
+        parent_version = 0
+        parent_relations = _load_suggested_relations(
+            db,
+            paper,
+            sentence_uuid_to_key,
+            paragraph_uuid_to_key,
+            sentence_uuid_to_paragraph_key,
+        )
+        parent_comments = []
+    else:
+        return None
+
     before_by_id = {relation.logical_relation_id: relation for relation in parent_relations}
     after_by_id = {relation.logical_relation_id: relation for relation in current_relations}
 
@@ -735,8 +753,8 @@ def _revision_changes(
     removed.sort(key=relation_sort_key)
     modified.sort(key=lambda change: relation_sort_key(change.after))
     return RevisionChanges(
-        parent_submission_id=revision.parent_submission_id,
-        parent_version=revision.parent_version,
+        parent_submission_id=parent_submission_id,
+        parent_version=parent_version,
         added=added,
         removed=removed,
         modified=modified,
@@ -755,6 +773,133 @@ def _latest_assignment_submission(db: Session, assignment_id: str):
         LIMIT 1
         """
     ), {"assignment_id": assignment_id}).mappings().first()
+
+
+def _assignment_baseline_submission(db: Session, assignment_id: str):
+    return _execute(db, text(
+        """
+        SELECT id, version, status, parent_submission_id, created_by_id, editor_role, created_at, submitted_at
+        FROM annotation_submissions
+        WHERE assignment_id = :assignment_id AND version = 0 AND status = 'baseline'
+        ORDER BY created_at, id
+        LIMIT 1
+        """
+    ), {"assignment_id": assignment_id}).mappings().first()
+
+
+def create_assignment_baseline(
+    db: Session,
+    assignment_id: str,
+    paper_uuid: str,
+    created_by_id: str,
+    created_at: datetime,
+) -> str:
+    """Snapshot the initial suggested relations as immutable assignment version 0."""
+    existing = _assignment_baseline_submission(db, assignment_id)
+    if existing is not None:
+        return _row_value(existing["id"])
+
+    baseline_id = str(uuid4())
+    _execute(db, text(
+        """
+        INSERT INTO annotation_submissions (
+            id, assignment_id, version, status, parent_submission_id,
+            created_by_id, editor_role, created_at, submitted_at
+        ) VALUES (
+            :id, :assignment_id, 0, 'baseline', NULL,
+            :created_by_id, 'baseline', :created_at, NULL
+        )
+        """
+    ), {
+        "id": baseline_id,
+        "assignment_id": assignment_id,
+        "created_by_id": created_by_id,
+        "created_at": created_at,
+    })
+
+    suggestion_sql = """
+        SELECT sr.id, sr.sentence_id, sr.support_paragraph_id,
+               sr.subject_mention_id, sr.object_mention_id,
+               sr.subject_text, sr.subject_type, sr.predicate,
+               sr.object_text, sr.object_type, sr.confidence, sr.accepted,
+               sr.evidence_text, sr.relation_origin, sr.inherited_from
+        FROM suggested_relations sr
+        JOIN suggestion_sets ss ON ss.id = sr.suggestion_set_id
+    """
+    suggestions = _execute(db, text(suggestion_sql + """
+        WHERE ss.paper_id = :paper_uuid AND COALESCE(ss.is_latest, TRUE) = TRUE
+        ORDER BY sr.id
+        """), {"paper_uuid": paper_uuid}).mappings().all()
+    if not suggestions:
+        suggestions = _execute(db, text(suggestion_sql + """
+            WHERE ss.paper_id = :paper_uuid
+            ORDER BY sr.id
+            """), {"paper_uuid": paper_uuid}).mappings().all()
+
+    insert_relation = text(
+        """
+        INSERT INTO annotation_submission_relations (
+            id, submission_id, logical_relation_id, suggested_relation_id, action,
+            sentence_id, support_paragraph_id, subject_mention_id, object_mention_id,
+            subject_text, subject_type, predicate, object_text, object_type,
+            confidence, accepted, evidence_text, relation_origin, inherited_from, raw_payload
+        ) VALUES (
+            :id, :submission_id, :logical_relation_id, :suggested_relation_id, 'keep',
+            :sentence_id, :support_paragraph_id, :subject_mention_id, :object_mention_id,
+            :subject_text, :subject_type, :predicate, :object_text, :object_type,
+            :confidence, :accepted, :evidence_text, :relation_origin, :inherited_from, NULL
+        )
+        """
+    )
+    suggestion_ids = [_row_value(suggestion["id"]) for suggestion in suggestions]
+    support_by_suggestion: dict[str, list[object]] = defaultdict(list)
+    if suggestion_ids:
+        support_statement = text(
+            """
+            SELECT suggested_relation_id, sentence_id
+            FROM suggested_relation_support_sentences
+            WHERE suggested_relation_id IN :suggestion_ids
+            ORDER BY suggested_relation_id, sentence_id
+            """
+        ).bindparams(bindparam("suggestion_ids", expanding=True))
+        support_rows = _execute(db, support_statement, {"suggestion_ids": suggestion_ids}).mappings().all()
+        for support in support_rows:
+            support_by_suggestion[_row_value(support["suggested_relation_id"])].append(support["sentence_id"])
+
+    for suggestion in suggestions:
+        suggestion_id = _row_value(suggestion["id"])
+        baseline_relation_id = str(uuid4())
+        _execute(db, insert_relation, {
+            "id": baseline_relation_id,
+            "submission_id": baseline_id,
+            "logical_relation_id": suggestion_id,
+            "suggested_relation_id": suggestion_id,
+            "sentence_id": suggestion["sentence_id"],
+            "support_paragraph_id": suggestion["support_paragraph_id"],
+            "subject_mention_id": suggestion["subject_mention_id"],
+            "object_mention_id": suggestion["object_mention_id"],
+            "subject_text": suggestion["subject_text"],
+            "subject_type": suggestion["subject_type"],
+            "predicate": suggestion["predicate"],
+            "object_text": suggestion["object_text"],
+            "object_type": suggestion["object_type"],
+            "confidence": suggestion["confidence"],
+            "accepted": suggestion["accepted"],
+            "evidence_text": suggestion["evidence_text"],
+            "relation_origin": suggestion["relation_origin"],
+            "inherited_from": suggestion["inherited_from"],
+        })
+        for support_sentence_id in support_by_suggestion.get(suggestion_id, []):
+            _execute(db, text(
+                """
+                INSERT INTO annotation_relation_support_sentences (submission_relation_id, sentence_id)
+                VALUES (:submission_relation_id, :sentence_id)
+                """
+            ), {
+                "submission_relation_id": baseline_relation_id,
+                "sentence_id": support_sentence_id,
+            })
+    return baseline_id
 
 
 def _load_assignment_relations(
@@ -1061,6 +1206,8 @@ def save_relations(
     draft_status = "review_draft" if editor_role == "reviewer" else "draft"
     latest = _latest_assignment_submission(db, assignment_id)
     latest_submission_id = _row_value(latest["id"]) if latest else None
+    baseline = _assignment_baseline_submission(db, assignment_id)
+    baseline_submission_id = _row_value(baseline["id"]) if baseline else None
     if latest_submission_id and not base_submission_id:
         raise DataServiceError(
             409,
@@ -1069,7 +1216,8 @@ def save_relations(
             "Refresh the editor and save again so newer work cannot be overwritten.",
             paper_id,
         )
-    if base_submission_id and base_submission_id != latest_submission_id:
+    valid_base_submission_id = latest_submission_id or baseline_submission_id
+    if base_submission_id and base_submission_id != valid_base_submission_id:
         raise DataServiceError(
             409,
             "stale_submission",
@@ -1085,16 +1233,23 @@ def save_relations(
             "Ask the annotator to save and submit a draft first.",
             paper_id,
         )
-    parent_submission_id = None
-    if latest is not None:
-        parent_submission_id = (
-            _row_value(latest["parent_submission_id"]) or None
-            if _row_value(latest["status"]) == draft_status
-            else latest_submission_id
-        )
     maps = _identity_maps_for_paper(db, paper.uuid)
     now = datetime.now(timezone.utc)
     try:
+        if latest is None and baseline is None:
+            create_assignment_baseline(db, assignment_id, paper.uuid, current_user.id, now)
+            baseline = _assignment_baseline_submission(db, assignment_id)
+
+        parent_submission_id = None
+        if latest is not None:
+            parent_submission_id = (
+                _row_value(latest["parent_submission_id"]) or None
+                if _row_value(latest["status"]) == draft_status
+                else latest_submission_id
+            )
+        elif baseline is not None:
+            parent_submission_id = _row_value(baseline["id"])
+
         workflow_service.mark_assignment_draft_saved(db, assignment_id, editor_role)
         version = _execute(db, text(
             """

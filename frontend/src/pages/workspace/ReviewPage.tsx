@@ -89,6 +89,7 @@ export function ReviewPage() {
           ) : (
             <div className="request-list review-paper-list">
               {submissions.map((submission) => {
+                const canOpenInEditor = submission.status === 'submitted' || submission.status === 'review_draft';
                 const rowContent = (
                   <>
                   <span className="review-row__heading">
@@ -119,12 +120,12 @@ export function ReviewPage() {
                       <span><small>Submitted</small><strong>{formatDate(submission.submitted_at)}</strong></span>
                     </span>
                   </span>
-                  {submission.status === 'submitted' ? (
+                  {canOpenInEditor ? (
                     <span className="review-row__open">Open in Editor <ArrowRight aria-hidden="true" size={15} /></span>
                   ) : null}
                   </>
                 );
-                return submission.status === 'submitted' ? (
+                return canOpenInEditor ? (
                   <button
                     key={submission.submission_id}
                     type="button"

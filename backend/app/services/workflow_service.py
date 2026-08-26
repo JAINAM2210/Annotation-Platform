@@ -377,6 +377,13 @@ def create_assignment(db: Session, payload: AssignmentCreateRequest, current_use
             "now": now,
             "due_at": payload.due_at,
         })
+        db_editor_service.create_assignment_baseline(
+            db,
+            assignment_id,
+            _row_value(paper["id"]),
+            current_user.id,
+            now,
+        )
         _audit_event(db, current_user, "assignment.created", "annotation_assignments", assignment_id, {"paper_id": payload.paper_id, "annotator_id": annotator.id})
         db.commit()
     except SQLAlchemyError as exc:

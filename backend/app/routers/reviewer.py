@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.auth_services import sync_pending_email_verifications
 from app.database import get_db
 from app.dependencies import require_reviewer_or_admin
 from app.models import RejectRequest, UserProfile, UserRead, UserRole, UserStatus
@@ -22,6 +23,8 @@ def list_signup_requests(
     status_filter: Annotated[UserStatus, Query(alias="status")] = UserStatus.pending,
 ) -> list[UserProfile]:
     del current_user
+    if status_filter == UserStatus.pending:
+        sync_pending_email_verifications(db, UserRole.annotator)
     statement = (
         select(UserProfile)
         .where(
